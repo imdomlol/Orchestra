@@ -36,8 +36,9 @@ enough to invoke external agent CLIs through thin role wrappers:
 12. external model wrappers
 13. worktree ownership hooks
 14. project sandbox image
+15. planner handoff ingestion
 
-The remaining work is closing the autonomous planning and review loop on top
+The remaining work is closing critic, worker, and integrator handoffs on top
 of these local contracts.
 
 ## Repository Layout
@@ -95,3 +96,13 @@ orch-codex-integrator --task-id T-0001 --task-yaml-path .orch/tasks/active/T-000
 
 Dispatched worker worktrees also receive a local pre-commit hook that enforces
 the task's `owned_files` and `forbidden_files` globs before a worker can commit.
+
+When a planner writes a Markdown artifact under `.orch/plans/`, it can hand it
+back with an orchestrator inbox message like:
+
+```json
+{"action": "planned", "plan_path": ".orch/plans/P-0001.md"}
+```
+
+`orch run --once` extracts fenced YAML task blocks, validates them, writes
+pending task YAMLs, and dispatches through the normal worker path when ready.

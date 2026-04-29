@@ -41,6 +41,7 @@ def copy_runtime_layout(repo: Path) -> None:
         ".orch/tasks/done",
         ".orch/locks",
         ".orch/requests",
+        ".orch/plans",
         ".orch/schemas",
     ]:
         (repo / directory).mkdir(parents=True, exist_ok=True)
@@ -128,6 +129,45 @@ def test_run_once_dispatches_ready_task_when_no_inbox_message(tmp_path: Path) ->
 
     assert result.kind == "dispatched"
     assert store.read("T-0001")["status"] == "in_progress"
+
+
+def test_run_once_ingests_planner_handoff_then_dispatches(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task()
+    plan_path = repo / ".orch/plans/P-0001.md"
+    plan_path.write_text(
+        f"# Plan\n\n```yaml\n{yaml.safe_dump(task, sort_keys=False)}```",
+        encoding="utf-8",
+    )
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "planned", "plan_path": ".orch/plans/P-0001.md"})
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "dispatched"
+    assert result.plan_ingest is not None
+    assert result.plan_ingest.task_count == 1
+    assert result.dispatch is not None
+    assert result.dispatch.task_id == "T-0001"
+    assert TaskStore(repo).read("T-0001")["status"] == "in_progress"
+    assert inbox.read_next("orchestrator") is None
+
+
+def test_run_once_leaves_invalid_planner_handoff_unacked(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "planned"})
+
+    try:
+        runtime(repo).run_once()
+    except ValueError as exc:
+        assert "plan_path" in str(exc)
+    else:
+        raise AssertionError("run_once should reject malformed planner handoff")
+
+    assert inbox.read_next("orchestrator") is not None
 
 
 def test_startup_reconcile_clears_stale_pid_and_counts_state(tmp_path: Path) -> None:

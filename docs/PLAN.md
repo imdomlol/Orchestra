@@ -11,6 +11,8 @@ runtime substrate (T-0006), dispatcher (T-0007), subprocess runner
 runner, external model wrapper scripts, and per-worktree ownership hooks
 implemented and tested. Project-specific Docker image assets are now
 configured and tested without requiring Docker during the unit suite.
+Planner handoff ingestion now turns embedded plan task YAML into validated
+pending tasks for dispatch.
 
 ---
 
@@ -234,8 +236,8 @@ authoritative; in-memory state is not.
 
 ## 11. What's Built vs What's Designed
 
-**Designed only (this doc):** full autonomous planner/critic/worker
-subprocess handoffs and complete failure escalation policy.
+**Designed only (this doc):** full autonomous critic/worker subprocess
+handoffs and complete failure escalation policy.
 
 **Implemented runtime tasks:**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
@@ -357,7 +359,23 @@ subprocess handoffs and complete failure escalation policy.
       - Image build command construction rejects configured paths outside the
         repo root.
 
-**Required external pieces (out of scope of T-0001…T-0014):**
+15. **T-0015 planner-handoff-ingest**
+    - Objective: Convert Gemini planner handoffs into validated pending task
+      YAMLs that the existing dispatcher can run.
+    - Owned files: `orch/plans.py`, `orch/runtime.py`,
+      `tests/test_plans.py`, `tests/test_runtime.py`, `README.md`,
+      `docs/PLAN.md`.
+    - Acceptance:
+      - Runtime handles orchestrator inbox messages with
+        `action: "planned"` and a repo-relative `plan_path`.
+      - Markdown plan artifacts are scanned for fenced YAML task blocks.
+      - Extracted tasks are schema-validated before any pending YAML is
+        written.
+      - Duplicate task ids and plan paths outside the repo are rejected.
+      - After successful ingest, runtime dispatches through the existing
+        dispatcher when worker capacity is available.
+
+**Required external pieces (out of scope of T-0001…T-0015):**
 - None for the local MVP substrate; real model CLI credentials and provider
   availability are environment-specific runtime concerns.
 
@@ -389,7 +407,6 @@ subprocess handoffs and complete failure escalation policy.
   this doc in the same PR.
 - §8 (parallelism) and §10 (failure policy) are tunable; change freely
   once T-0010 is running and there is real data.
-- Next iterations should focus on closing the autonomous planning and review
-  loop now that the local substrate, wrappers, hooks, and sandbox image are in
-  place.
+- Next iterations should focus on critic/worker/integrator handoff handling
+  now that planner output can become dispatchable task YAML.
 - When in doubt: prefer fewer features, stricter contracts, more logs.

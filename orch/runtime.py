@@ -13,6 +13,7 @@ from uuid import uuid4
 from orch.config import OrchestraConfig, RuntimeConfig, load_config
 from orch.dispatcher import DispatchResult, Dispatcher
 from orch.inbox import Inbox, InboxMessage
+from orch.plans import PlanIngestResult, PlanIngestor
 from orch.task_store import TaskStore
 
 
@@ -36,6 +37,7 @@ class RunOnceResult:
     message: str
     dispatch: DispatchResult | None = None
     inbox_message: InboxMessage | None = None
+    plan_ingest: PlanIngestResult | None = None
 
 
 class OrchestraRuntime:
@@ -49,6 +51,7 @@ class OrchestraRuntime:
         task_store: TaskStore | None = None,
         inbox: Inbox | None = None,
         dispatcher: Dispatcher | None = None,
+        plan_ingestor: PlanIngestor | None = None,
     ) -> None:
         self.root = root.resolve()
         self.runtime_config = runtime_config
@@ -59,6 +62,10 @@ class OrchestraRuntime:
             runtime=runtime_config,
             task_store=self.task_store,
             inbox=self.inbox,
+        )
+        self.plan_ingestor = plan_ingestor or PlanIngestor(
+            self.root,
+            task_store=self.task_store,
         )
 
     @classmethod
@@ -140,6 +147,27 @@ class OrchestraRuntime:
                 kind="plan_rejected",
                 message="worker rejected plan; re-planning required",
                 inbox_message=message,
+            )
+        if action == "planned":
+            plan_path = message.body.get("plan_path")
+            if not isinstance(plan_path, str) or not plan_path.strip():
+                raise ValueError("planned message must include plan_path")
+            ingest = self.plan_ingestor.ingest(plan_path)
+            self.inbox.ack(message)
+            dispatch = self.dispatcher.dispatch_next()
+            if dispatch is not None:
+                return RunOnceResult(
+                    kind="dispatched",
+                    message=f"ingested {ingest.task_count} tasks; dispatched {dispatch.task_id}",
+                    dispatch=dispatch,
+                    inbox_message=message,
+                    plan_ingest=ingest,
+                )
+            return RunOnceResult(
+                kind="plan_ingested",
+                message=f"ingested {ingest.task_count} tasks",
+                inbox_message=message,
+                plan_ingest=ingest,
             )
 
         self.inbox.ack(message)
@@ -230,4 +258,8 @@ def result_to_dict(result: RunOnceResult) -> dict[str, Any]:
         data["message_path"] = str(result.dispatch.message_path)
     if result.inbox_message is not None:
         data["inbox_message"] = str(result.inbox_message.path)
+    if result.plan_ingest is not None:
+        data["plan_path"] = str(result.plan_ingest.plan_path)
+        data["task_paths"] = [str(path) for path in result.plan_ingest.task_paths]
+        data["task_count"] = result.plan_ingest.task_count
     return data
