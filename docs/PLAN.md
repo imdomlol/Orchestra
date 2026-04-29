@@ -5,8 +5,8 @@ single source of truth for the project's design and scope. Other models and
 contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
-**Status:** design complete; substrate tasks (T-0001…T-0005) specified; runtime
-tasks (T-0006…T-0010) not yet specified. No code written.
+**Status:** design complete; substrate tasks (T-0001…T-0005) implemented and
+tested; runtime tasks (T-0006…T-0010) not yet specified.
 
 ---
 
@@ -225,10 +225,10 @@ authoritative; in-memory state is not.
 
 ## 11. What's Built vs What's Designed
 
-**Designed only (this doc):** schema, layout, role contracts, state machine,
-merge strategy, failure handling.
+**Designed only (this doc):** runtime orchestration, state machine execution,
+merge strategy implementation, failure handling implementation.
 
-**Substrate tasks (specified, not yet built):**
+**Substrate tasks (implemented and tested):**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
 2. **T-0002 task-schema** — schema, example, `scripts/validate_task.py`.
 3. **T-0003 config-loader** — `orch.config` reads `orchestrator.toml` +
