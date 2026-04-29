@@ -37,9 +37,10 @@ enough to invoke external agent CLIs through thin role wrappers:
 13. worktree ownership hooks
 14. project sandbox image
 15. planner handoff ingestion
+16. worker-to-critic handoff
 
-The remaining work is closing critic, worker, and integrator handoffs on top
-of these local contracts.
+The remaining work is closing critic and integrator handoffs on top of these
+local contracts.
 
 ## Repository Layout
 
@@ -106,3 +107,12 @@ back with an orchestrator inbox message like:
 
 `orch run --once` extracts fenced YAML task blocks, validates them, writes
 pending task YAMLs, and dispatches through the normal worker path when ready.
+
+When a worker finishes a branch, it can hand back:
+
+```json
+{"action": "worker_completed", "task_id": "T-0001"}
+```
+
+`orch run --once` exports `.orch/patches/T-0001.diff`, transitions the task to
+`critic_review`, and posts a critic inbox message with artifact paths.

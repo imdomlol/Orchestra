@@ -170,6 +170,32 @@ def test_run_once_leaves_invalid_planner_handoff_unacked(tmp_path: Path) -> None
     assert inbox.read_next("orchestrator") is not None
 
 
+def test_run_once_dispatches_worker_completion_to_critic(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task()
+    task["owned_files"] = ["feature.txt"]
+    store = TaskStore(repo)
+    store.write_pending(task)
+    store.transition("T-0001", "active", "self_review")
+    worktree = repo / ".orch/worktrees/T-0001"
+    git(repo, "worktree", "add", "-b", "task/T-0001", str(worktree), "main")
+    (worktree / "feature.txt").write_text("hello\n", encoding="utf-8")
+    git(worktree, "add", "feature.txt")
+    git(worktree, "commit", "-m", "add feature")
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "worker_completed", "task_id": "T-0001"})
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "critic_dispatched"
+    assert result.critic_dispatch is not None
+    assert result.critic_dispatch.diff_path == repo / ".orch/patches/T-0001.diff"
+    assert store.read("T-0001")["status"] == "critic_review"
+    assert inbox.read_next("critic") is not None
+    assert inbox.read_next("orchestrator") is None
+
+
 def test_startup_reconcile_clears_stale_pid_and_counts_state(tmp_path: Path) -> None:
     repo = init_repo(tmp_path)
     copy_runtime_layout(repo)

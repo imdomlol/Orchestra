@@ -14,6 +14,7 @@ from orch.config import OrchestraConfig, RuntimeConfig, load_config
 from orch.dispatcher import DispatchResult, Dispatcher
 from orch.inbox import Inbox, InboxMessage
 from orch.plans import PlanIngestResult, PlanIngestor
+from orch.review import CriticDispatchResult, ReviewDispatcher
 from orch.task_store import TaskStore
 
 
@@ -36,6 +37,7 @@ class RunOnceResult:
     kind: str
     message: str
     dispatch: DispatchResult | None = None
+    critic_dispatch: CriticDispatchResult | None = None
     inbox_message: InboxMessage | None = None
     plan_ingest: PlanIngestResult | None = None
 
@@ -52,6 +54,7 @@ class OrchestraRuntime:
         inbox: Inbox | None = None,
         dispatcher: Dispatcher | None = None,
         plan_ingestor: PlanIngestor | None = None,
+        review_dispatcher: ReviewDispatcher | None = None,
     ) -> None:
         self.root = root.resolve()
         self.runtime_config = runtime_config
@@ -66,6 +69,11 @@ class OrchestraRuntime:
         self.plan_ingestor = plan_ingestor or PlanIngestor(
             self.root,
             task_store=self.task_store,
+        )
+        self.review_dispatcher = review_dispatcher or ReviewDispatcher(
+            self.root,
+            task_store=self.task_store,
+            inbox=self.inbox,
         )
 
     @classmethod
@@ -169,6 +177,18 @@ class OrchestraRuntime:
                 inbox_message=message,
                 plan_ingest=ingest,
             )
+        if action == "worker_completed":
+            task_id = message.body.get("task_id")
+            if not isinstance(task_id, str) or not task_id.strip():
+                raise ValueError("worker_completed message must include task_id")
+            critic = self.review_dispatcher.dispatch_to_critic(task_id)
+            self.inbox.ack(message)
+            return RunOnceResult(
+                kind="critic_dispatched",
+                message=f"sent {task_id} to critic review",
+                critic_dispatch=critic,
+                inbox_message=message,
+            )
 
         self.inbox.ack(message)
         return RunOnceResult(
@@ -256,6 +276,11 @@ def result_to_dict(result: RunOnceResult) -> dict[str, Any]:
         data["task_path"] = str(result.dispatch.task_path)
         data["worktree_path"] = str(result.dispatch.worktree_path)
         data["message_path"] = str(result.dispatch.message_path)
+    if result.critic_dispatch is not None:
+        data["task_id"] = result.critic_dispatch.task_id
+        data["task_path"] = str(result.critic_dispatch.task_path)
+        data["diff_path"] = str(result.critic_dispatch.diff_path)
+        data["message_path"] = str(result.critic_dispatch.message_path)
     if result.inbox_message is not None:
         data["inbox_message"] = str(result.inbox_message.path)
     if result.plan_ingest is not None:

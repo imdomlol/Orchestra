@@ -12,7 +12,8 @@ runner, external model wrapper scripts, and per-worktree ownership hooks
 implemented and tested. Project-specific Docker image assets are now
 configured and tested without requiring Docker during the unit suite.
 Planner handoff ingestion now turns embedded plan task YAML into validated
-pending tasks for dispatch.
+pending tasks for dispatch. Worker completion handoffs now export review
+diffs and dispatch critic review messages.
 
 ---
 
@@ -236,8 +237,8 @@ authoritative; in-memory state is not.
 
 ## 11. What's Built vs What's Designed
 
-**Designed only (this doc):** full autonomous critic/worker subprocess
-handoffs and complete failure escalation policy.
+**Designed only (this doc):** full autonomous critic/integrator handoffs and
+complete failure escalation policy.
 
 **Implemented runtime tasks:**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
@@ -375,7 +376,23 @@ handoffs and complete failure escalation policy.
       - After successful ingest, runtime dispatches through the existing
         dispatcher when worker capacity is available.
 
-**Required external pieces (out of scope of T-0001…T-0015):**
+16. **T-0016 worker-critic-handoff**
+    - Objective: Route completed worker branches into critic review using
+      durable diff artifacts and inbox handoff messages.
+    - Owned files: `orch/review.py`, `orch/runtime.py`,
+      `tests/test_review.py`, `tests/test_runtime.py`, `README.md`,
+      `docs/PLAN.md`.
+    - Acceptance:
+      - Runtime handles orchestrator inbox messages with
+        `action: "worker_completed"` and `task_id`.
+      - Review dispatch exports `main..task/<id>` to
+        `.orch/patches/<id>.diff`.
+      - Task status transitions to `critic_review`.
+      - Critic inbox messages include only artifact paths and role metadata.
+      - Malformed worker completion messages remain unacknowledged by failing
+        before ack.
+
+**Required external pieces (out of scope of T-0001…T-0016):**
 - None for the local MVP substrate; real model CLI credentials and provider
   availability are environment-specific runtime concerns.
 
@@ -407,6 +424,6 @@ handoffs and complete failure escalation policy.
   this doc in the same PR.
 - §8 (parallelism) and §10 (failure policy) are tunable; change freely
   once T-0010 is running and there is real data.
-- Next iterations should focus on critic/worker/integrator handoff handling
-  now that planner output can become dispatchable task YAML.
+- Next iterations should focus on critic and integrator handoff handling now
+  that worker output can become critic review input.
 - When in doubt: prefer fewer features, stricter contracts, more logs.
