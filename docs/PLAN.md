@@ -7,9 +7,9 @@ it in the same PR as any design-affecting change.
 
 **Status:** design complete; substrate tasks (T-0001…T-0005), inbox
 runtime substrate (T-0006), dispatcher (T-0007), subprocess runner
-(T-0008), merge driver (T-0009), runtime CLI (T-0010), and Docker sandbox
-runner implemented and tested. External model wrapper scripts remain out of
-scope for this phase.
+(T-0008), merge driver (T-0009), runtime CLI (T-0010), Docker sandbox
+runner, and external model wrapper scripts implemented and tested.
+Project-specific Docker images remain out of scope for this phase.
 
 ---
 
@@ -311,9 +311,21 @@ policy.
       - Docker command construction is tested without requiring Docker during
         the unit test suite.
 
-**Required external pieces (out of scope of T-0001…T-0010):**
-- Thin wrapper scripts for `gemini` and `codex` CLIs that inject role
-  prompts, pass task YAML, and emit handoff JSON to the right inbox.
+12. **T-0012 external-model-wrappers**
+    - Objective: Add thin role wrapper scripts for Gemini and Codex subprocess
+      handoffs.
+    - Owned files: `orch/model_wrapper.py`, `orch/wrapper_cli.py`,
+      `orch/runner.py`, `tests/test_model_wrapper.py`, `pyproject.toml`,
+      `README.md`, `docs/PLAN.md`.
+    - Acceptance:
+      - Wrappers inject checked-in role prompts and artifact-path context.
+      - Configured external CLI commands receive the composed prompt on stdin.
+      - stdout and stderr are captured through the shared runner log contract.
+      - JSON handoffs emitted by the model are posted to the durable inbox.
+      - Console entry points exist for planner, critic, worker, and integrator
+        roles.
+
+**Required external pieces (out of scope of T-0001…T-0012):**
 - Per-worktree pre-commit hook enforcing `owned_files` globs.
 - Project-specific Docker images that contain each repo's dependencies.
 
@@ -345,7 +357,7 @@ policy.
   this doc in the same PR.
 - §8 (parallelism) and §10 (failure policy) are tunable; change freely
   once T-0010 is running and there is real data.
-- External model wrappers and project-specific Docker images are the next
-  implementation deliverables before the happy path can run without
+- Per-worktree ownership enforcement and project-specific Docker images are
+  the next implementation deliverables before the happy path can run without
   hand-authored task YAML.
 - When in doubt: prefer fewer features, stricter contracts, more logs.

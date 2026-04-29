@@ -53,6 +53,7 @@ class SubprocessRunner:
         role: str,
         log_name: str | None = None,
         cwd: Path | None = None,
+        stdin: str | None = None,
         timeout_seconds: int,
     ) -> ProcessResult:
         if not argv:
@@ -71,6 +72,7 @@ class SubprocessRunner:
             completed = subprocess.run(
                 list(argv),
                 cwd=working_dir,
+                input=stdin,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -120,6 +122,7 @@ class SubprocessRunner:
             role=role,
             log_name=log_name,
             cwd=cwd,
+            stdin=None,
             timeout_seconds=timeout_seconds,
         )
 
@@ -184,6 +187,7 @@ class DockerRunner(SubprocessRunner):
         role: str,
         log_name: str | None = None,
         cwd: Path | None = None,
+        stdin: str | None = None,
         timeout_seconds: int,
     ) -> ProcessResult:
         working_dir = (cwd or self.root).resolve()
@@ -194,6 +198,7 @@ class DockerRunner(SubprocessRunner):
             role=role,
             log_name=log_name,
             cwd=self.root,
+            stdin=stdin,
             timeout_seconds=timeout_seconds,
         )
 

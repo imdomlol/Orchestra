@@ -19,6 +19,11 @@ dev = [
 
 [project.scripts]
 orch = "orch.cli:main"
+orch-wrapper = "orch.wrapper_cli:main"
+orch-gemini-planner = "orch.wrapper_cli:planner_main"
+orch-gemini-critic = "orch.wrapper_cli:critic_main"
+orch-codex-worker = "orch.wrapper_cli:worker_main"
+orch-codex-integrator = "orch.wrapper_cli:integrator_main"
 
 [tool.setuptools.packages.find]
 include = ["orch*"]

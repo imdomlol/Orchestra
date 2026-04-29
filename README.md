@@ -19,8 +19,8 @@ See [docs/PLAN.md](docs/PLAN.md) for the architecture and task roadmap.
 
 ## Current Status
 
-The project is in substrate implementation. The first goal is to make the
-local contracts real before invoking any external agent CLIs:
+The project is in substrate implementation. The local contracts are now real
+enough to invoke external agent CLIs through thin role wrappers:
 
 1. repository skeleton
 2. task schema and validator
@@ -29,9 +29,13 @@ local contracts real before invoking any external agent CLIs:
 5. worktree manager
 6. inbox
 7. dispatcher
+8. subprocess runner
+9. merge driver
+10. runtime CLI
+11. Docker sandbox runner
+12. external model wrappers
 
-Subprocess execution, integration, and model wrappers come after those pieces
-are tested.
+Per-worktree ownership hooks and project-specific Docker images remain next.
 
 ## Repository Layout
 
@@ -63,3 +67,14 @@ python scripts/validate_task.py examples/task.example.yaml
 
 Docker must be available for real task and integration command execution. The
 default sandbox image is configured in `.orch/config/orchestrator.toml`.
+
+The model wrapper entry points compose checked-in role prompts, pass artifact
+paths to the configured CLI on stdin, capture logs, and post JSON handoffs to
+`.orch/inbox/orchestrator/`:
+
+```bash
+orch-gemini-planner --request-path .orch/requests/R-0001.md
+orch-gemini-critic --task-yaml-path .orch/tasks/active/T-0001.yaml --diff-path .orch/patches/T-0001.patch
+orch-codex-worker --task-id T-0001 --task-yaml-path .orch/tasks/active/T-0001.yaml --worktree-path .orch/worktrees/T-0001
+orch-codex-integrator --task-id T-0001 --task-yaml-path .orch/tasks/active/T-0001.yaml --patch-path .orch/patches/T-0001.patch
+```
