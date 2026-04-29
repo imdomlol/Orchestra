@@ -11,6 +11,7 @@ The MVP is intentionally small:
 - one target repository
 - one user request at a time
 - git worktrees for worker isolation
+- Docker for command sandboxing
 - explicit task files
 - append-only logs and durable artifacts under `.orch/`
 
@@ -59,3 +60,6 @@ Run the checks:
 pytest
 python scripts/validate_task.py examples/task.example.yaml
 ```
+
+Docker must be available for real task and integration command execution. The
+default sandbox image is configured in `.orch/config/orchestrator.toml`.

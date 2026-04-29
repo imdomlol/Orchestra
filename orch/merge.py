@@ -8,7 +8,8 @@ import shutil
 import subprocess
 from typing import Sequence
 
-from orch.runner import ProcessResult, SubprocessRunner
+from orch.config import OrchestraConfig, load_config
+from orch.runner import ProcessResult, SubprocessRunner, make_runner
 from orch.task_store import ReviewNote, TaskStore
 
 
@@ -47,6 +48,25 @@ class MergeDriver:
         self.base_ref = base_ref
         self.worktrees_root = self.root / ".orch" / "worktrees"
         self.patches_root = self.root / ".orch" / "patches"
+
+    @classmethod
+    def from_config(
+        cls,
+        *,
+        root: Path = Path("."),
+        config: OrchestraConfig | None = None,
+        check_commands: Sequence[str] = (),
+        base_ref: str = "main",
+    ) -> "MergeDriver":
+        resolved_root = root.resolve()
+        loaded = config or load_config(resolved_root / ".orch" / "config")
+        return cls(
+            root=resolved_root,
+            runner=make_runner(resolved_root, sandbox=loaded.sandbox),
+            check_commands=check_commands,
+            check_timeout_seconds=loaded.runtime.default_timeout_seconds,
+            base_ref=base_ref,
+        )
 
     def merge_task(self, task_id: str) -> MergeResult:
         task = self.task_store.read(task_id)

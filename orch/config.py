@@ -34,6 +34,15 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class SandboxConfig:
+    mode: str
+    docker: str
+    image: str
+    network: str
+    workdir: str
+
+
+@dataclass(frozen=True)
 class BudgetConfig:
     max_tasks_per_request: int
     max_wall_clock_minutes: int
@@ -52,6 +61,7 @@ class OrchestraConfig:
     models: ModelConfig
     cli: CliConfig
     runtime: RuntimeConfig
+    sandbox: SandboxConfig
     budgets: BudgetConfig
     policies: PolicyConfig
 
@@ -78,6 +88,13 @@ def load_config(config_dir: Path = DEFAULT_CONFIG_DIR) -> OrchestraConfig:
                 orchestrator, "runtime", "default_timeout_seconds", minimum=1
             ),
             max_retries=_required_int(orchestrator, "runtime", "max_retries", minimum=0),
+        ),
+        sandbox=SandboxConfig(
+            mode=_required_choice(orchestrator, "sandbox", "mode", {"docker"}),
+            docker=_required_str(orchestrator, "sandbox", "docker"),
+            image=_required_str(orchestrator, "sandbox", "image"),
+            network=_required_choice(orchestrator, "sandbox", "network", {"none", "host"}),
+            workdir=_required_str(orchestrator, "sandbox", "workdir"),
         ),
         budgets=BudgetConfig(
             max_tasks_per_request=_required_int(
@@ -121,6 +138,17 @@ def _required_str(data: dict[str, Any], section: str | None, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         prefix = f"{section}." if section else ""
         raise ValueError(f"{prefix}{key} must be a non-empty string")
+    return value
+
+
+def _required_choice(
+    data: dict[str, Any], section: str | None, key: str, choices: set[str]
+) -> str:
+    value = _required_str(data, section, key)
+    if value not in choices:
+        prefix = f"{section}." if section else ""
+        allowed = ", ".join(sorted(choices))
+        raise ValueError(f"{prefix}{key} must be one of: {allowed}")
     return value
 
 

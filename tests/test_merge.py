@@ -8,6 +8,7 @@ import sys
 import yaml
 
 from orch.merge import MergeDriver
+from orch.runner import DockerRunner
 from orch.task_store import TaskStore
 from orch.worktree import WorktreeManager
 
@@ -45,6 +46,10 @@ def copy_runtime_layout(repo: Path) -> None:
     ]:
         (repo / directory).mkdir(parents=True, exist_ok=True)
     shutil.copy(".orch/schemas/task.schema.json", repo / ".orch/schemas/task.schema.json")
+
+
+def copy_config(repo: Path) -> None:
+    shutil.copytree(".orch/config", repo / ".orch/config")
 
 
 def load_task(task_id: str = "T-0001") -> dict:
@@ -134,3 +139,14 @@ def test_merge_task_returns_conflict_when_patch_does_not_apply(tmp_path: Path) -
     assert not (repo / ".orch/worktrees/_integration").exists()
     assert git(repo, "branch", "--list", "integrate/T-0001").stdout == ""
     assert "Patch did not apply" in TaskStore(repo).read("T-0001")["review_notes"][-1]["body"]
+
+
+def test_merge_driver_from_config_uses_docker_runner(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    copy_config(repo)
+
+    driver = MergeDriver.from_config(root=repo, check_commands=["pytest -q"])
+
+    assert isinstance(driver.runner, DockerRunner)
+    assert driver.check_commands == ("pytest -q",)

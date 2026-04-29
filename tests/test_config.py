@@ -14,6 +14,8 @@ def test_loads_default_config() -> None:
     assert config.models.orchestrator == "claude-opus"
     assert config.cli.gemini == "gemini"
     assert config.runtime.max_workers == 1
+    assert config.sandbox.mode == "docker"
+    assert config.sandbox.image == "python:3.11-slim"
     assert ".git/**" in config.policies.forbidden_globs
 
 

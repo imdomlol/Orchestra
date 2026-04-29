@@ -7,8 +7,9 @@ it in the same PR as any design-affecting change.
 
 **Status:** design complete; substrate tasks (T-0001…T-0005), inbox
 runtime substrate (T-0006), dispatcher (T-0007), subprocess runner
-(T-0008), merge driver (T-0009), and runtime CLI (T-0010) implemented and
-tested. External model wrapper scripts remain out of scope for this phase.
+(T-0008), merge driver (T-0009), runtime CLI (T-0010), and Docker sandbox
+runner implemented and tested. External model wrapper scripts remain out of
+scope for this phase.
 
 ---
 
@@ -44,6 +45,11 @@ multiple specialized models coordinated locally.
 
 Isolation: one `git worktree` per active worker task. No shared mutable state
 besides the filesystem under `.orch/` and the git repo itself.
+
+Command sandbox: task and integration commands run through the configured
+Docker sandbox by default. The repo is mounted read-only at `/workspace`; the
+active command working directory is mounted read-write over its matching path.
+The default network mode is `none`.
 
 ---
 
@@ -290,13 +296,26 @@ policy.
       - Startup reconciliation follows §10 resume order.
       - Runtime uses `T-0006` inbox, `T-0007` dispatcher, `T-0008` runner, and
         `T-0009` merge driver rather than duplicating those contracts.
+11. **T-0011 docker-sandbox-runner**
+    - Objective: Execute allowlisted commands inside Docker containers rather
+      than directly on the host.
+    - Owned files: `orch/runner.py`, `orch/config.py`,
+      `.orch/config/orchestrator.toml`, `tests/test_runner.py`,
+      `tests/test_config.py`, `docs/PLAN.md`.
+    - Acceptance:
+      - Sandbox config declares Docker binary, image, container workdir, and
+        network mode.
+      - Docker runner preserves the existing exact command allowlist contract.
+      - Repo root is mounted read-only while the command cwd is mounted
+        read-write.
+      - Docker command construction is tested without requiring Docker during
+        the unit test suite.
 
 **Required external pieces (out of scope of T-0001…T-0010):**
 - Thin wrapper scripts for `gemini` and `codex` CLIs that inject role
   prompts, pass task YAML, and emit handoff JSON to the right inbox.
 - Per-worktree pre-commit hook enforcing `owned_files` globs.
-- Sandboxed command runner (e.g. `firejail` or restricted shell) so
-  `allowed_commands` is enforced, not aspirational.
+- Project-specific Docker images that contain each repo's dependencies.
 
 ---
 
@@ -310,7 +329,9 @@ policy.
 - Patch-based merge collapses worker-internal commits into one merge
   commit on `main` (intentional).
 - Two-round critic cap will sometimes escalate hard tasks prematurely.
-- Safety relies on the command-runner sandbox; weak sandbox = weak safety.
+- Safety relies on the Docker daemon boundary; users with Docker access are
+  effectively privileged on the host, so this is a practical isolation layer
+  rather than a multi-tenant security boundary.
 - No built-in cost/latency cap until `orchestrator.toml` budgets are added
   (max tasks per request, max wall-clock, max tokens) — do this before
   first real run.
@@ -324,6 +345,7 @@ policy.
   this doc in the same PR.
 - §8 (parallelism) and §10 (failure policy) are tunable; change freely
   once T-0010 is running and there is real data.
-- External model wrappers are the next implementation deliverable before the
-  happy path can run without hand-authored task YAML.
+- External model wrappers and project-specific Docker images are the next
+  implementation deliverables before the happy path can run without
+  hand-authored task YAML.
 - When in doubt: prefer fewer features, stricter contracts, more logs.

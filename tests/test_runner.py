@@ -5,7 +5,8 @@ import sys
 
 import pytest
 
-from orch.runner import CommandNotAllowed, SubprocessRunner
+from orch.config import SandboxConfig
+from orch.runner import CommandNotAllowed, DockerRunner, SubprocessRunner, make_runner
 
 
 def test_run_allowed_captures_stdout_and_stderr(tmp_path: Path) -> None:
@@ -75,3 +76,48 @@ def test_run_rejects_cwd_outside_root(tmp_path: Path) -> None:
             cwd=tmp_path.parent,
             timeout_seconds=5,
         )
+
+
+def test_docker_runner_builds_sandbox_command_for_worktree(tmp_path: Path) -> None:
+    worktree = tmp_path / ".orch" / "worktrees" / "T-0001"
+    worktree.mkdir(parents=True)
+    sandbox = SandboxConfig(
+        mode="docker",
+        docker="docker",
+        image="python:3.11-slim",
+        network="none",
+        workdir="/workspace",
+    )
+    runner = DockerRunner(tmp_path, sandbox=sandbox)
+
+    argv = runner.build_docker_argv(["pytest", "-q"], cwd=worktree)
+
+    assert argv == (
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--workdir",
+        "/workspace/.orch/worktrees/T-0001",
+        "--volume",
+        f"{tmp_path}:/workspace:ro",
+        "--volume",
+        f"{worktree}:/workspace/.orch/worktrees/T-0001:rw",
+        "python:3.11-slim",
+        "sh",
+        "-lc",
+        "pytest -q",
+    )
+
+
+def test_make_runner_uses_docker_for_configured_sandbox(tmp_path: Path) -> None:
+    sandbox = SandboxConfig(
+        mode="docker",
+        docker="docker",
+        image="python:3.11-slim",
+        network="none",
+        workdir="/workspace",
+    )
+
+    assert isinstance(make_runner(tmp_path, sandbox=sandbox), DockerRunner)
