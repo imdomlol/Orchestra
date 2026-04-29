@@ -5,9 +5,9 @@ single source of truth for the project's design and scope. Other models and
 contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
-**Status:** design complete; substrate tasks (T-0001…T-0005) and inbox
-runtime substrate (T-0006) implemented and tested; runtime tasks
-(T-0007…T-0010) not yet specified.
+**Status:** design complete; substrate tasks (T-0001…T-0005), inbox
+runtime substrate (T-0006), and dispatcher (T-0007) implemented and tested;
+runtime tasks (T-0008…T-0010) not yet specified.
 
 ---
 
@@ -241,10 +241,12 @@ merge strategy implementation, failure handling implementation.
    removal with unmerged commits.
 6. **T-0006 inbox** — atomic write/read of `.orch/inbox/<role>/*.json`
    with ordering, explicit acknowledgement, and at-least-once delivery.
+7. **T-0007 dispatcher** — pick the next ready pending task, respecting
+   merged dependencies, active owned-file collisions, and `max_workers`;
+   create its worktree, move its YAML to active, and post the worker handoff
+   message.
 
 **Runtime tasks (not yet specified — next design pass):**
-7. **T-0007 dispatcher** — pick next ready task (deps met, no glob
-   collisions vs active set), assign worktree, post worker inbox msg.
 8. **T-0008 subprocess runner** — spawn role CLIs with timeouts, capture
    stdout/stderr to per-role log dir, enforce `allowed_commands` via a
    restricted shell or pre-exec hook.

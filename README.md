@@ -27,9 +27,10 @@ local contracts real before invoking any external agent CLIs:
 4. task store
 5. worktree manager
 6. inbox
+7. dispatcher
 
-Dispatch, subprocess execution, integration, and model wrappers come after
-those pieces are tested.
+Subprocess execution, integration, and model wrappers come after those pieces
+are tested.
 
 ## Repository Layout
 
