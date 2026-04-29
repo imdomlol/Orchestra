@@ -6,8 +6,9 @@ contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
 **Status:** design complete; substrate tasks (T-0001…T-0005), inbox
-runtime substrate (T-0006), and dispatcher (T-0007) implemented and tested;
-runtime tasks (T-0008…T-0010) not yet specified.
+runtime substrate (T-0006), dispatcher (T-0007), and subprocess runner
+(T-0008) implemented and tested; runtime tasks (T-0009…T-0010) specified but
+not implemented.
 
 ---
 
@@ -246,14 +247,48 @@ merge strategy implementation, failure handling implementation.
    create its worktree, move its YAML to active, and post the worker handoff
    message.
 
-**Runtime tasks (not yet specified — next design pass):**
-8. **T-0008 subprocess runner** — spawn role CLIs with timeouts, capture
-   stdout/stderr to per-role log dir, enforce `allowed_commands` via a
-   restricted shell or pre-exec hook.
-9. **T-0009 merge driver** — implement §9 happy path + conflict fallback
-   as a single function with structured result.
-10. **T-0010 `orch run` CLI** — async event loop tying T-0006…T-0009
-    together; `orch submit "<prompt>"` writes a request and nudges loop.
+**Implemented and tested:**
+8. **T-0008 subprocess-runner**
+   - Objective: Provide one local subprocess boundary for model CLIs and
+     task acceptance commands.
+   - Owned files: `orch/runner.py`, `tests/test_runner.py`, `docs/PLAN.md`.
+   - Acceptance:
+     - Exact-string command allowlists are enforced before spawning task
+       commands.
+     - `stdout` and `stderr` are captured under `.orch/logs/<role>/`.
+     - Timeouts return a structured result and write a timeout note to
+       stderr logs.
+     - Runner refuses to execute with a working directory outside the repo
+       root.
+
+**Runtime tasks (specified but not yet implemented):**
+9. **T-0009 merge-driver**
+   - Objective: Implement §9 happy-path patch export, integration worktree
+     application, check execution, and final task transition as one structured
+     merge API.
+   - Owned files: `orch/merge.py`, `tests/test_merge.py`, `docs/PLAN.md`.
+   - Acceptance:
+     - Exports `main..task/<id>` to `.orch/patches/<id>.patch`.
+     - Creates a fresh `_integration` worktree and `integrate/<id>` branch.
+     - Applies patches with `git am --3way`, aborting and returning a conflict
+       result on failure.
+     - Runs configured full-suite commands through `orch.runner`.
+     - On green, merges into `main`, moves the task YAML to `done/merged`, and
+       removes integration and worker worktrees.
+10. **T-0010 orch-run-cli**
+    - Objective: Add an `orch` CLI that ties request submission, inbox polling,
+      dispatch, subprocess execution, critic/integrator handoff, and resume
+      reconciliation into one serial-by-default runtime loop.
+    - Owned files: `orch/cli.py`, `orch/runtime.py`, `tests/test_cli.py`,
+      `tests/test_runtime.py`, `pyproject.toml`, `docs/PLAN.md`.
+    - Acceptance:
+      - `orch submit "<prompt>"` writes an append-only request file and posts
+        an orchestrator inbox nudge.
+      - `orch run --once` processes the oldest actionable inbox or dispatch
+        event deterministically.
+      - Startup reconciliation follows §10 resume order.
+      - Runtime uses `T-0006` inbox, `T-0007` dispatcher, `T-0008` runner, and
+        `T-0009` merge driver rather than duplicating those contracts.
 
 **Required external pieces (out of scope of T-0001…T-0010):**
 - Thin wrapper scripts for `gemini` and `codex` CLIs that inject role
