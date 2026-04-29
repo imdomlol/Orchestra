@@ -5,8 +5,9 @@ single source of truth for the project's design and scope. Other models and
 contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
-**Status:** design complete; substrate tasks (T-0001…T-0005) implemented and
-tested; runtime tasks (T-0006…T-0010) not yet specified.
+**Status:** design complete; substrate tasks (T-0001…T-0005) and inbox
+runtime substrate (T-0006) implemented and tested; runtime tasks
+(T-0007…T-0010) not yet specified.
 
 ---
 
@@ -228,7 +229,7 @@ authoritative; in-memory state is not.
 **Designed only (this doc):** runtime orchestration, state machine execution,
 merge strategy implementation, failure handling implementation.
 
-**Substrate tasks (implemented and tested):**
+**Implemented and tested:**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
 2. **T-0002 task-schema** — schema, example, `scripts/validate_task.py`.
 3. **T-0003 config-loader** — `orch.config` reads `orchestrator.toml` +
@@ -238,10 +239,10 @@ merge strategy implementation, failure handling implementation.
 5. **T-0005 worktree-manager** — create/destroy worktrees at
    `.orch/worktrees/<task_id>/` on branch `task/<task_id>`; refuse
    removal with unmerged commits.
+6. **T-0006 inbox** — atomic write/read of `.orch/inbox/<role>/*.json`
+   with ordering, explicit acknowledgement, and at-least-once delivery.
 
 **Runtime tasks (not yet specified — next design pass):**
-6. **T-0006 inbox** — atomic write/read of `.orch/inbox/<role>/*.json`
-   with ordering and at-least-once delivery.
 7. **T-0007 dispatcher** — pick next ready task (deps met, no glob
    collisions vs active set), assign worktree, post worker inbox msg.
 8. **T-0008 subprocess runner** — spawn role CLIs with timeouts, capture
@@ -285,7 +286,7 @@ merge strategy implementation, failure handling implementation.
   this doc in the same PR.
 - §8 (parallelism) and §10 (failure policy) are tunable; change freely
   once T-0010 is running and there is real data.
-- T-0006…T-0010 are the next design deliverable. Spec them in the same
+- T-0007…T-0010 are the next design deliverable. Spec them in the same
   task-card format as T-0001…T-0005 (objective / owned_files / acceptance)
   before writing code.
 - When in doubt: prefer fewer features, stricter contracts, more logs.
