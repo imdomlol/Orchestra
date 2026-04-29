@@ -6,9 +6,9 @@ contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
 **Status:** design complete; substrate tasks (T-0001…T-0005), inbox
-runtime substrate (T-0006), dispatcher (T-0007), and subprocess runner
-(T-0008) implemented and tested; runtime tasks (T-0009…T-0010) specified but
-not implemented.
+runtime substrate (T-0006), dispatcher (T-0007), subprocess runner
+(T-0008), and merge driver (T-0009) implemented and tested; runtime task
+T-0010 specified but not implemented.
 
 ---
 
@@ -230,7 +230,7 @@ authoritative; in-memory state is not.
 **Designed only (this doc):** runtime orchestration, state machine execution,
 merge strategy implementation, failure handling implementation.
 
-**Implemented and tested:**
+**Implemented runtime tasks:**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
 2. **T-0002 task-schema** — schema, example, `scripts/validate_task.py`.
 3. **T-0003 config-loader** — `orch.config` reads `orchestrator.toml` +
@@ -261,7 +261,6 @@ merge strategy implementation, failure handling implementation.
      - Runner refuses to execute with a working directory outside the repo
        root.
 
-**Runtime tasks (specified but not yet implemented):**
 9. **T-0009 merge-driver**
    - Objective: Implement §9 happy-path patch export, integration worktree
      application, check execution, and final task transition as one structured
@@ -275,6 +274,8 @@ merge strategy implementation, failure handling implementation.
      - Runs configured full-suite commands through `orch.runner`.
      - On green, merges into `main`, moves the task YAML to `done/merged`, and
        removes integration and worker worktrees.
+
+**Runtime tasks (specified but not yet implemented):**
 10. **T-0010 orch-run-cli**
     - Objective: Add an `orch` CLI that ties request submission, inbox polling,
       dispatch, subprocess execution, critic/integrator handoff, and resume
@@ -323,7 +324,6 @@ merge strategy implementation, failure handling implementation.
   this doc in the same PR.
 - §8 (parallelism) and §10 (failure policy) are tunable; change freely
   once T-0010 is running and there is real data.
-- T-0007…T-0010 are the next design deliverable. Spec them in the same
-  task-card format as T-0001…T-0005 (objective / owned_files / acceptance)
-  before writing code.
+- T-0010 is the next implementation deliverable. Keep the task-card format
+  current as runtime behavior changes.
 - When in doubt: prefer fewer features, stricter contracts, more logs.
