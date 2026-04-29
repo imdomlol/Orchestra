@@ -1,0 +1,15 @@
+.orch/*
+!.orch/config/
+!.orch/config/**
+!.orch/schemas/
+!.orch/schemas/**
+!.orch/README.md
+
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+dist/
+build/
+*.egg-info/
