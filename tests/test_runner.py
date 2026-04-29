@@ -85,6 +85,8 @@ def test_docker_runner_builds_sandbox_command_for_worktree(tmp_path: Path) -> No
         mode="docker",
         docker="docker",
         image="python:3.11-slim",
+        dockerfile="docker/orchestra-sandbox.Dockerfile",
+        build_context=".",
         network="none",
         workdir="/workspace",
     )
@@ -116,6 +118,8 @@ def test_make_runner_uses_docker_for_configured_sandbox(tmp_path: Path) -> None:
         mode="docker",
         docker="docker",
         image="python:3.11-slim",
+        dockerfile="docker/orchestra-sandbox.Dockerfile",
+        build_context=".",
         network="none",
         workdir="/workspace",
     )

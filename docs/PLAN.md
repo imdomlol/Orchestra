@@ -9,8 +9,8 @@ it in the same PR as any design-affecting change.
 runtime substrate (T-0006), dispatcher (T-0007), subprocess runner
 (T-0008), merge driver (T-0009), runtime CLI (T-0010), Docker sandbox
 runner, external model wrapper scripts, and per-worktree ownership hooks
-implemented and tested.
-Project-specific Docker images remain out of scope for this phase.
+implemented and tested. Project-specific Docker image assets are now
+configured and tested without requiring Docker during the unit suite.
 
 ---
 
@@ -234,9 +234,8 @@ authoritative; in-memory state is not.
 
 ## 11. What's Built vs What's Designed
 
-**Designed only (this doc):** external model wrapper scripts, full autonomous
-planner/critic/worker subprocess handoffs, and complete failure escalation
-policy.
+**Designed only (this doc):** full autonomous planner/critic/worker
+subprocess handoffs and complete failure escalation policy.
 
 **Implemented runtime tasks:**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
@@ -340,8 +339,27 @@ policy.
         owned.
       - Merge cleanup removes the task hook directory with the worker worktree.
 
-**Required external pieces (out of scope of T-0001…T-0013):**
-- Project-specific Docker images that contain each repo's dependencies.
+14. **T-0014 project-sandbox-image**
+    - Objective: Provide a project-specific Docker image definition and build
+      command for sandboxed task and integration checks.
+    - Owned files: `docker/orchestra-sandbox.Dockerfile`, `.dockerignore`,
+      `.orch/config/orchestrator.toml`, `orch/config.py`, `orch/images.py`,
+      `orch/cli.py`, `tests/test_config.py`, `tests/test_images.py`,
+      `tests/test_cli.py`, `tests/test_runner.py`, `README.md`,
+      `docs/PLAN.md`.
+    - Acceptance:
+      - Sandbox config names the image tag, Dockerfile, and build context.
+      - The project Dockerfile installs runtime and test dependencies.
+      - `.dockerignore` excludes git, virtualenv, caches, and runtime
+        orchestrator state from the build context.
+      - `orch image build --print` emits the exact configured Docker build
+        command without requiring Docker.
+      - Image build command construction rejects configured paths outside the
+        repo root.
+
+**Required external pieces (out of scope of T-0001…T-0014):**
+- None for the local MVP substrate; real model CLI credentials and provider
+  availability are environment-specific runtime concerns.
 
 ---
 
@@ -371,6 +389,7 @@ policy.
   this doc in the same PR.
 - §8 (parallelism) and §10 (failure policy) are tunable; change freely
   once T-0010 is running and there is real data.
-- Project-specific Docker images are the next implementation deliverable
-  before the happy path can run without hand-authored task YAML.
+- Next iterations should focus on closing the autonomous planning and review
+  loop now that the local substrate, wrappers, hooks, and sandbox image are in
+  place.
 - When in doubt: prefer fewer features, stricter contracts, more logs.

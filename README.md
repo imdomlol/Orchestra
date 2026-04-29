@@ -35,8 +35,10 @@ enough to invoke external agent CLIs through thin role wrappers:
 11. Docker sandbox runner
 12. external model wrappers
 13. worktree ownership hooks
+14. project sandbox image
 
-Project-specific Docker images remain next.
+The remaining work is closing the autonomous planning and review loop on top
+of these local contracts.
 
 ## Repository Layout
 
@@ -68,6 +70,17 @@ python scripts/validate_task.py examples/task.example.yaml
 
 Docker must be available for real task and integration command execution. The
 default sandbox image is configured in `.orch/config/orchestrator.toml`.
+Build the project-specific sandbox image with:
+
+```bash
+orch image build
+```
+
+To inspect the configured build without invoking Docker:
+
+```bash
+orch image build --print
+```
 
 The model wrapper entry points compose checked-in role prompts, pass artifact
 paths to the configured CLI on stdin, capture logs, and post JSON handoffs to

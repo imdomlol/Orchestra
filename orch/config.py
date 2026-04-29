@@ -38,6 +38,8 @@ class SandboxConfig:
     mode: str
     docker: str
     image: str
+    dockerfile: str
+    build_context: str
     network: str
     workdir: str
 
@@ -93,6 +95,8 @@ def load_config(config_dir: Path = DEFAULT_CONFIG_DIR) -> OrchestraConfig:
             mode=_required_choice(orchestrator, "sandbox", "mode", {"docker"}),
             docker=_required_str(orchestrator, "sandbox", "docker"),
             image=_required_str(orchestrator, "sandbox", "image"),
+            dockerfile=_required_str(orchestrator, "sandbox", "dockerfile"),
+            build_context=_required_str(orchestrator, "sandbox", "build_context"),
             network=_required_choice(orchestrator, "sandbox", "network", {"none", "host"}),
             workdir=_required_str(orchestrator, "sandbox", "workdir"),
         ),

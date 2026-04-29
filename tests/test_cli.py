@@ -63,3 +63,17 @@ def test_run_once_cli_reports_idle(tmp_path: Path, capsys) -> None:
 
     assert code == 0
     assert '"kind": "idle"' in capsys.readouterr().out
+
+
+def test_image_build_prints_configured_docker_command(tmp_path: Path, capsys) -> None:
+    repo = init_repo(tmp_path)
+    copy_configured_layout(repo)
+
+    code = main(["--root", str(repo), "image", "build", "--print", "--pull"])
+
+    assert code == 0
+    output = capsys.readouterr().out.strip()
+    assert "docker build" in output
+    assert "--tag orchestra-sandbox:py3.12" in output
+    assert "--pull" in output
+    assert str(repo / "docker/orchestra-sandbox.Dockerfile") in output

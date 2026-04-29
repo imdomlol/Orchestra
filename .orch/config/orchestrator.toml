@@ -17,7 +17,9 @@ max_retries = 2
 [sandbox]
 mode = "docker"
 docker = "docker"
-image = "python:3.11-slim"
+image = "orchestra-sandbox:py3.12"
+dockerfile = "docker/orchestra-sandbox.Dockerfile"
+build_context = "."
 network = "none"
 workdir = "/workspace"
 
