@@ -1,0 +1,41 @@
+id: T-0001
+objective: Create the initial Orchestra repository skeleton.
+background_context: >
+  This task establishes the project directories and committed documentation
+  needed before runtime orchestration exists.
+plan_artifacts:
+  - docs/PLAN.md
+owned_files:
+  - README.md
+  - .gitignore
+  - .orch/README.md
+  - docs/**
+  - examples/**
+  - orch/**
+  - scripts/**
+  - tests/**
+forbidden_files:
+  - .git/**
+  - .env
+  - .env.*
+allowed_commands:
+  - python scripts/validate_task.py examples/task.example.yaml
+  - pytest
+acceptance_criteria:
+  - id: AC-01
+    kind: file_exists
+    check: README.md exists and describes the project.
+  - id: AC-02
+    kind: command
+    check: python scripts/validate_task.py examples/task.example.yaml
+dependencies: []
+branch: task/T-0001
+worktree_path: .orch/worktrees/T-0001
+status: pending
+risks: []
+result_artifacts: []
+review_notes:
+  - author: claude-orchestrator
+    timestamp: "2026-04-28T21:30:00Z"
+    verdict: note
+    body: Initial example task for schema validation.
