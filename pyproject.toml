@@ -17,6 +17,9 @@ dev = [
     "pytest>=8.0",
 ]
 
+[project.scripts]
+orch = "orch.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["orch*"]
 

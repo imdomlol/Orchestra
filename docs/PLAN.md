@@ -7,8 +7,8 @@ it in the same PR as any design-affecting change.
 
 **Status:** design complete; substrate tasks (T-0001…T-0005), inbox
 runtime substrate (T-0006), dispatcher (T-0007), subprocess runner
-(T-0008), and merge driver (T-0009) implemented and tested; runtime task
-T-0010 specified but not implemented.
+(T-0008), merge driver (T-0009), and runtime CLI (T-0010) implemented and
+tested. External model wrapper scripts remain out of scope for this phase.
 
 ---
 
@@ -227,8 +227,9 @@ authoritative; in-memory state is not.
 
 ## 11. What's Built vs What's Designed
 
-**Designed only (this doc):** runtime orchestration, state machine execution,
-merge strategy implementation, failure handling implementation.
+**Designed only (this doc):** external model wrapper scripts, full autonomous
+planner/critic/worker subprocess handoffs, and complete failure escalation
+policy.
 
 **Implemented runtime tasks:**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
@@ -275,7 +276,6 @@ merge strategy implementation, failure handling implementation.
      - On green, merges into `main`, moves the task YAML to `done/merged`, and
        removes integration and worker worktrees.
 
-**Runtime tasks (specified but not yet implemented):**
 10. **T-0010 orch-run-cli**
     - Objective: Add an `orch` CLI that ties request submission, inbox polling,
       dispatch, subprocess execution, critic/integrator handoff, and resume
@@ -324,6 +324,6 @@ merge strategy implementation, failure handling implementation.
   this doc in the same PR.
 - §8 (parallelism) and §10 (failure policy) are tunable; change freely
   once T-0010 is running and there is real data.
-- T-0010 is the next implementation deliverable. Keep the task-card format
-  current as runtime behavior changes.
+- External model wrappers are the next implementation deliverable before the
+  happy path can run without hand-authored task YAML.
 - When in doubt: prefer fewer features, stricter contracts, more logs.
