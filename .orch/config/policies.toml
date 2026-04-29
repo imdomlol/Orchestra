@@ -1,0 +1,16 @@
+forbidden_globs = [
+  ".git/**",
+  ".orch/config/**",
+  ".orch/schemas/**",
+  ".env",
+  ".env.*",
+]
+
+default_allowed_commands = [
+  "pytest",
+  "pytest -q",
+  "python scripts/validate_task.py examples/task.example.yaml",
+]
+
+max_added_lines = 800
+max_changed_files = 12

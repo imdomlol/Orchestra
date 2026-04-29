@@ -1,0 +1,19 @@
+[models]
+orchestrator = "claude-opus"
+planner = "gemini"
+critic = "gemini"
+worker = "codex-gpt-5.5"
+integrator = "codex-gpt-5.5"
+
+[cli]
+gemini = "gemini"
+codex = "codex"
+
+[runtime]
+max_workers = 1
+default_timeout_seconds = 1800
+max_retries = 2
+
+[budgets]
+max_tasks_per_request = 5
+max_wall_clock_minutes = 60
