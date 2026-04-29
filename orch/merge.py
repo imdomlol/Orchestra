@@ -128,6 +128,7 @@ class MergeDriver:
             self._cleanup_integration(integration_path, integrate_branch)
             worker_path = self.root / task["worktree_path"]
             self._remove_worktree(worker_path)
+            self._remove_ownership_hook(task_id)
             self._delete_branch(branch)
             return MergeResult(
                 task_id=task_id,
@@ -194,6 +195,9 @@ class MergeDriver:
     def _cleanup_integration(self, path: Path, branch: str) -> None:
         self._remove_worktree(path)
         self._delete_branch(branch)
+
+    def _remove_ownership_hook(self, task_id: str) -> None:
+        shutil.rmtree(self.root / ".orch" / "hooks" / task_id, ignore_errors=True)
 
     def _delete_branch(self, branch: str) -> None:
         self._git("branch", "-D", branch, check=False)

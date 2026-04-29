@@ -76,6 +76,7 @@ def test_dispatch_next_claims_task_creates_worktree_and_posts_worker_message(
     assert result.task_id == "T-0001"
     assert result.task_path == repo / ".orch/tasks/active/T-0001.yaml"
     assert result.worktree_path == repo / ".orch/worktrees/T-0001"
+    assert (repo / ".orch/hooks/T-0001/pre-commit").exists()
     assert store.read("T-0001")["status"] == "in_progress"
     message = Inbox(repo).read_next("worker")
     assert message is not None

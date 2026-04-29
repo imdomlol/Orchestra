@@ -41,6 +41,63 @@ def test_create_worktree_for_task(tmp_path: Path) -> None:
     assert (info.path / "README.md").exists()
 
 
+def test_create_installs_pre_commit_ownership_hook(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    manager = WorktreeManager(repo)
+
+    info = manager.create(
+        "T-0001",
+        owned_files=["README.md"],
+        forbidden_files=[".env", ".env.*"],
+    )
+
+    hook_path = repo / ".orch/hooks/T-0001/pre-commit"
+    assert hook_path.exists()
+    assert git(info.path, "config", "--worktree", "core.hooksPath").stdout.strip() == str(
+        hook_path.parent
+    )
+
+    (info.path / "README.md").write_text("# Allowed\n", encoding="utf-8")
+    git(info.path, "add", "README.md")
+    git(info.path, "commit", "-m", "allowed change")
+
+    (info.path / "OUTSIDE.md").write_text("nope\n", encoding="utf-8")
+    git(info.path, "add", "OUTSIDE.md")
+    blocked = subprocess.run(
+        ["git", "commit", "-m", "outside change"],
+        cwd=info.path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert blocked.returncode != 0
+    assert "not owned: OUTSIDE.md" in blocked.stderr
+
+
+def test_pre_commit_hook_rejects_forbidden_files_even_when_owned(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    manager = WorktreeManager(repo)
+    info = manager.create(
+        "T-0001",
+        owned_files=["**"],
+        forbidden_files=[".env"],
+    )
+
+    (info.path / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    git(info.path, "add", ".env")
+    blocked = subprocess.run(
+        ["git", "commit", "-m", "forbidden change"],
+        cwd=info.path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert blocked.returncode != 0
+    assert "forbidden: .env" in blocked.stderr
+
+
 def test_rejects_invalid_task_id(tmp_path: Path) -> None:
     repo = init_repo(tmp_path)
     manager = WorktreeManager(repo)

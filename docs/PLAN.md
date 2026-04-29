@@ -8,7 +8,8 @@ it in the same PR as any design-affecting change.
 **Status:** design complete; substrate tasks (T-0001…T-0005), inbox
 runtime substrate (T-0006), dispatcher (T-0007), subprocess runner
 (T-0008), merge driver (T-0009), runtime CLI (T-0010), Docker sandbox
-runner, and external model wrapper scripts implemented and tested.
+runner, external model wrapper scripts, and per-worktree ownership hooks
+implemented and tested.
 Project-specific Docker images remain out of scope for this phase.
 
 ---
@@ -325,8 +326,21 @@ policy.
       - Console entry points exist for planner, critic, worker, and integrator
         roles.
 
-**Required external pieces (out of scope of T-0001…T-0012):**
-- Per-worktree pre-commit hook enforcing `owned_files` globs.
+13. **T-0013 worktree-ownership-hooks**
+    - Objective: Install a local pre-commit hook in every worker worktree that
+      enforces task `owned_files` and `forbidden_files` before commits.
+    - Owned files: `orch/worktree.py`, `orch/dispatcher.py`,
+      `orch/merge.py`, `tests/test_worktree.py`, `tests/test_dispatcher.py`,
+      `README.md`, `docs/PLAN.md`.
+    - Acceptance:
+      - Dispatch passes task ownership globs into worktree creation.
+      - Worker worktrees use worktree-local `core.hooksPath` configuration.
+      - The hook rejects staged paths outside `owned_files`.
+      - The hook rejects staged paths matching `forbidden_files`, even if also
+        owned.
+      - Merge cleanup removes the task hook directory with the worker worktree.
+
+**Required external pieces (out of scope of T-0001…T-0013):**
 - Project-specific Docker images that contain each repo's dependencies.
 
 ---
@@ -357,7 +371,6 @@ policy.
   this doc in the same PR.
 - §8 (parallelism) and §10 (failure policy) are tunable; change freely
   once T-0010 is running and there is real data.
-- Per-worktree ownership enforcement and project-specific Docker images are
-  the next implementation deliverables before the happy path can run without
-  hand-authored task YAML.
+- Project-specific Docker images are the next implementation deliverable
+  before the happy path can run without hand-authored task YAML.
 - When in doubt: prefer fewer features, stricter contracts, more logs.

@@ -34,8 +34,9 @@ enough to invoke external agent CLIs through thin role wrappers:
 10. runtime CLI
 11. Docker sandbox runner
 12. external model wrappers
+13. worktree ownership hooks
 
-Per-worktree ownership hooks and project-specific Docker images remain next.
+Project-specific Docker images remain next.
 
 ## Repository Layout
 
@@ -78,3 +79,6 @@ orch-gemini-critic --task-yaml-path .orch/tasks/active/T-0001.yaml --diff-path .
 orch-codex-worker --task-id T-0001 --task-yaml-path .orch/tasks/active/T-0001.yaml --worktree-path .orch/worktrees/T-0001
 orch-codex-integrator --task-id T-0001 --task-yaml-path .orch/tasks/active/T-0001.yaml --patch-path .orch/patches/T-0001.patch
 ```
+
+Dispatched worker worktrees also receive a local pre-commit hook that enforces
+the task's `owned_files` and `forbidden_files` globs before a worker can commit.

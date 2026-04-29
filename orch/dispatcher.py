@@ -30,7 +30,14 @@ class DispatchResult:
 
 
 class WorktreeCreator(Protocol):
-    def create(self, task_id: str, base_ref: str = "main") -> WorktreeInfo:
+    def create(
+        self,
+        task_id: str,
+        base_ref: str = "main",
+        *,
+        owned_files: list[str] | None = None,
+        forbidden_files: list[str] | None = None,
+    ) -> WorktreeInfo:
         ...
 
 
@@ -70,7 +77,12 @@ class Dispatcher:
                 if not self._is_ready(task, active_tasks):
                     continue
 
-                info = self.worktrees.create(task_id, self.base_ref)
+                info = self.worktrees.create(
+                    task_id,
+                    self.base_ref,
+                    owned_files=task.get("owned_files", []),
+                    forbidden_files=task.get("forbidden_files", []),
+                )
                 active_path = self.task_store.transition(task_id, "active", "in_progress")
                 message_path = self.inbox.post(
                     "worker",
