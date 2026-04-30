@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from scripts.validate_task import validate_task
+from orch.validate_task import validate_task
 from orch.task_store import TaskStore
 
 

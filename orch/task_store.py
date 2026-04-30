@@ -12,7 +12,7 @@ from typing import Any, Iterator
 
 import yaml
 
-from scripts.validate_task import validate_task
+from orch.validate_task import validate_task
 
 
 TASK_DIRS = ("pending", "active", "done")
