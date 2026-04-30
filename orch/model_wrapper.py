@@ -33,7 +33,7 @@ ROLE_SPECS = {
         "cli": "claude",
         "model": "orchestrator",
         "log_role": "planner",
-        "headless_args": ["--print"],
+        "headless_args": ["--print", "--bare"],
     },
     "codex-worker": {
         "prompt": "codex-worker.md",
