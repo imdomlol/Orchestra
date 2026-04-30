@@ -6,7 +6,7 @@ worker = "codex-gpt-5.5"
 integrator = "codex-gpt-5.5"
 
 [cli]
-gemini = "gemini"
+gemini = "gemini -p ''"
 codex = "codex"
 
 [runtime]
