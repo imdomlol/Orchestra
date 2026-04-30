@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import shlex
 import signal
 import sys
@@ -31,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
                 root=args.root,
                 on_progress=_print_progress,
                 on_confirm=_ask_confirm,
+                model_stderr_sink=_model_stderr_sink,
             )
             if args.once:
                 result = runtime.run_once()
@@ -131,6 +133,42 @@ _RESULT_LABELS: dict[str, str] = {
     "budget_exceeded": "Budget exceeded",
     "ignored_message": "Ignored message",
 }
+
+
+_STDERR_SUPPRESS = re.compile(
+    r"^\s*(at |file:///|\[object Object\]|Full report available at:|bundle/chunk-"
+    r"|Ripgrep is not available|Falling back to GrepTool"
+    r"|cause:|retryDelayMs:|reason:)\s*",
+)
+
+_QUOTA_RE = re.compile(r"Please retry in ([\d.]+)s")
+
+
+def _model_stderr_sink(line: str) -> None:
+    """Filter model stderr — suppress stack traces, show clean error summaries."""
+    stripped = line.strip()
+    if not stripped:
+        return
+    if _STDERR_SUPPRESS.match(stripped):
+        return
+
+    if "TerminalQuotaError" in stripped or "exhausted your daily quota" in stripped:
+        match = _QUOTA_RE.search(stripped)
+        if match:
+            secs = int(float(match.group(1)))
+            print(f"  ✗ Quota exceeded — retry in {secs}s", flush=True)
+        else:
+            print("  ✗ Quota exceeded for this model", flush=True)
+        return
+
+    if "API key not valid" in stripped or "API_KEY_INVALID" in stripped:
+        print("  ✗ Invalid API key — set a valid key and retry", flush=True)
+        return
+
+    if "code: 429" in stripped or '"code":429' in stripped:
+        return
+
+    print(f"  · {stripped}", flush=True)
 
 
 def _print_progress(message: str) -> None:

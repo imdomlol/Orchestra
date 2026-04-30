@@ -79,6 +79,7 @@ class OrchestraRuntime:
         model_wrapper: RoleRunner | None = None,
         on_progress: Callable[[str], None] | None = None,
         on_confirm: Callable[[str], bool] | None = None,
+        model_stderr_sink: Callable[[str], None] | None = None,
     ) -> None:
         self.root = root.resolve()
         self.runtime_config = runtime_config
@@ -110,6 +111,7 @@ class OrchestraRuntime:
         self.model_wrapper = model_wrapper
         self._on_progress = on_progress
         self._on_confirm = on_confirm
+        self._model_stderr_sink = model_stderr_sink
 
     def _progress(self, message: str) -> None:
         if self._on_progress is not None:
@@ -128,6 +130,7 @@ class OrchestraRuntime:
         config: OrchestraConfig | None = None,
         on_progress: Callable[[str], None] | None = None,
         on_confirm: Callable[[str], bool] | None = None,
+        model_stderr_sink: Callable[[str], None] | None = None,
     ) -> "OrchestraRuntime":
         resolved_root = root.resolve()
         loaded = config or load_config(resolved_root / ".orch" / "config")
@@ -139,6 +142,7 @@ class OrchestraRuntime:
             merge_driver=merge_driver,
             on_progress=on_progress,
             on_confirm=on_confirm,
+            model_stderr_sink=model_stderr_sink,
         )
 
     def submit(self, prompt: str) -> SubmitResult:
@@ -325,7 +329,7 @@ class OrchestraRuntime:
         planner_wrapper = self.model_wrapper or ModelWrapper(
             root=self.root,
             inbox=self.inbox,
-            stderr_sink=self._on_progress,
+            stderr_sink=self._model_stderr_sink,
         )
         self._progress("Calling Gemini planner...")
         planner = planner_wrapper.run_role(
@@ -452,7 +456,7 @@ class OrchestraRuntime:
         if wrapper_role is None:
             raise ValueError(f"unsupported agent inbox role: {message.role}")
 
-        wrapper = self.model_wrapper or ModelWrapper(root=self.root, inbox=self.inbox, stderr_sink=self._on_progress)
+        wrapper = self.model_wrapper or ModelWrapper(root=self.root, inbox=self.inbox, stderr_sink=self._model_stderr_sink)
         context = dict(message.body)
         context.pop("role", None)
         task_id = context.get("task_id")
