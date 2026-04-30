@@ -5,18 +5,22 @@ single source of truth for the project's design and scope. Other models and
 contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
-**Status:** design complete; substrate tasks (T-0001…T-0005), inbox
-runtime substrate (T-0006), dispatcher (T-0007), subprocess runner
-(T-0008), merge driver (T-0009), runtime CLI (T-0010), Docker sandbox
-runner, external model wrapper scripts, and per-worktree ownership hooks
-implemented and tested. Project-specific Docker image assets are now
-configured and tested without requiring Docker during the unit suite.
-Planner handoff ingestion now turns embedded plan task YAML into validated
-pending tasks for dispatch. Worker completion handoffs now export review
-diffs and dispatch critic review messages. Critic review handoffs now
-route approve verdicts through MergeDriver integration, route
-request_changes back to the worker (up to max_retries rounds), escalate
-to blocked on retry exhaustion, and abandon on reject.
+**Status:** design complete; substrate tasks T-0001…T-0017 implemented and
+tested (69 passing tests). T-0018 planner auto-invocation is now wired:
+`submit_request` invokes the planner wrapper, consumes its `planned`
+handoff, and ingests validated pending tasks without manual wrapper
+execution. The full local pipeline — request submission, plan ingestion,
+worker dispatch, worker→critic handoff, and critic verdict routing
+through `MergeDriver`, rework, escalation, or abandonment — is in place
+and exercised by the unit suite.
+
+What is **not** yet wired: the runtime still does not invoke the worker,
+critic, or integrator CLI itself. The wrapper scripts
+(`orch-codex-worker`, `orch-gemini-critic`, etc.) must be run by hand for
+those steps. Closing that loop, plus a continuous `orch run`, budget
+enforcement, an `orch doctor` preflight, and a first-drive runbook, is
+the work required before a user can do a real end-to-end test drive —
+captured as T-0019…T-0023 in §14.
 
 ---
 
@@ -240,8 +244,11 @@ authoritative; in-memory state is not.
 
 ## 11. What's Built vs What's Designed
 
-**Designed only (this doc):** full autonomous critic/integrator handoffs and
-complete failure escalation policy.
+**Designed only (this doc):** runtime-driven invocation of the worker,
+critic, and integrator CLIs (currently those wrappers must be run
+manually); a continuous `orch run` event loop; budget enforcement; an
+`orch doctor` preflight; and the first-drive runbook. See §14 for the
+concrete tasks required to enable a first end-to-end test drive.
 
 **Implemented runtime tasks:**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
@@ -448,8 +455,128 @@ complete failure escalation policy.
   this doc in the same PR.
 - §8 (parallelism) and §10 (failure policy) are tunable; change freely
   once T-0010 is running and there is real data.
-- Next iterations should focus on a continuous `orch run` loop (multiple
-  `run_once` calls), budget enforcement (max_tasks_per_request,
-  max_wall_clock_minutes), and wiring the `codex-integrator` model wrapper
-  as an optional pre-merge review step before `MergeDriver`.
+- Next iterations are captured in §14 (First Test Drive) — these block
+  the first real end-to-end run. Beyond that, candidates include wiring
+  the optional `codex-integrator` pre-merge review step, parallel
+  dispatch hardening, and a human-escalation notification channel.
 - When in doubt: prefer fewer features, stricter contracts, more logs.
+
+---
+
+## 14. First Test Drive — Required Implementation
+
+T-0001…T-0017 give us a working substrate, but several pieces sit between
+"unit tests pass" and "Orchestra autonomously lands a small change on a
+throwaway repo." This section enumerates the discrete tasks required
+before a user can perform a first real end-to-end run.
+
+The shape of the remaining gap: `run_once` now spawns the planner for
+submitted requests, but the worker, critic, and integrator subprocesses
+still require manual wrapper invocation. Several safety rails (budgets,
+preflight checks, kill switch documentation) are not yet in place.
+T-0019…T-0023 close that gap.
+
+**T-0018 planner-auto-invocation — implemented**
+  - Objective: When the runtime processes a `submit_request` message,
+    invoke the configured planner CLI through `ModelWrapper`, capture its
+    handoff, and post a `planned` message to the orchestrator inbox in
+    the same `run_once` call.
+  - Owned files: `orch/runtime.py`, `orch/model_wrapper.py`,
+    `tests/test_runtime.py`, `tests/test_model_wrapper.py`,
+    `docs/PLAN.md`.
+  - Acceptance:
+    - Submitting a request and calling `orch run --once` produces a plan
+      artifact and at least one pending task without manual intervention.
+    - Planner failures (non-zero exit, missing handoff) ack the request
+      message, emit a `planning_failed` `RunOnceResult`, and write
+      stderr to `.orch/logs/planner/`. The loop does not spin on the
+      same failing request.
+    - Tests cover the success path, missing-handoff path, and non-zero
+      exit path with a mocked wrapper subprocess.
+
+**T-0019 agent-driver loop**
+  - Objective: Add a runtime-side driver that consumes the `worker`,
+    `critic`, and `integrator` inboxes by invoking each role's wrapper
+    through `ModelWrapper`, capturing the JSON handoff, and acking the
+    role inbox message only after the wrapper succeeds.
+  - Owned files: `orch/runtime.py`, `orch/model_wrapper.py`,
+    `tests/test_runtime.py`, `docs/PLAN.md`.
+  - Acceptance:
+    - `run_once` drives at most one wrapper subprocess per call and
+      remains deterministic given the same inbox state.
+    - A failed wrapper leaves the role inbox message in place for retry,
+      with the failure recorded under `.orch/logs/<role>/`.
+    - The worker→critic→merge happy path is exercised end-to-end with
+      mocked wrappers; no manual CLI invocation is required.
+
+**T-0020 continuous-run-loop**
+  - Objective: Implement `orch run` (without `--once`) as a continuous
+    loop that drains actionable work, sleeps for a configurable poll
+    interval, and terminates cleanly on SIGINT/SIGTERM.
+  - Owned files: `orch/cli.py`, `orch/runtime.py`, `tests/test_cli.py`,
+    `tests/test_runtime.py`, `.orch/config/orchestrator.toml`,
+    `docs/PLAN.md`.
+  - Acceptance:
+    - `orch run` polls until the request is exhausted or a budget cap
+      from T-0021 is hit.
+    - Poll interval is read from `[runtime] poll_interval_seconds` with
+      a sane default (e.g. 2s).
+    - Signal handling writes a clean shutdown line to
+      `.orch/logs/orchestrator/`, removes the orchestrator pid file,
+      and leaves active worktrees and inbox state intact for resume.
+
+**T-0021 budget-enforcement**
+  - Objective: Wire `[budgets]` from `orchestrator.toml` into the
+    runtime so first-time users have hard caps before pointing Orchestra
+    at a real repo.
+  - Owned files: `orch/runtime.py`, `orch/plans.py`,
+    `tests/test_runtime.py`, `tests/test_plans.py`, `docs/PLAN.md`.
+  - Acceptance:
+    - `max_tasks_per_request` rejects plan ingest when the count would
+      exceed the cap, records a `budget_exceeded` event, and does not
+      write partial pending YAMLs.
+    - `max_wall_clock_minutes` is enforced per request: the continuous
+      loop exits with a `budget_exceeded` `RunOnceResult` once the cap
+      is hit, even if work remains.
+    - Budget rejections leave inbox state recoverable so a follow-up run
+      with raised budgets can resume the request.
+
+**T-0022 doctor-preflight**
+  - Objective: Add `orch doctor` to verify the local environment before
+    a first run.
+  - Owned files: `orch/cli.py`, `orch/doctor.py`,
+    `tests/test_doctor.py`, `docs/PLAN.md`.
+  - Acceptance:
+    - Checks: configured `gemini` and `codex` CLIs are on `PATH` and
+      respond to `--version`; `docker` is reachable and the configured
+      sandbox image is present (or buildable); `git` is configured with
+      a user name and email; `.orch/schemas/task.schema.json` validates
+      `examples/task.example.yaml`; required `.orch/` subdirectories
+      exist.
+    - Prints one pass/fail line per check and exits non-zero on any
+      failure.
+    - Does not require live model authentication beyond `--version`.
+
+**T-0023 first-drive-runbook**
+  - Objective: Document the end-to-end first-run procedure so a user can
+    reproduce a successful test drive on a throwaway repo.
+  - Owned files: `docs/RUNBOOK.md`, `README.md`, `docs/PLAN.md`.
+  - Acceptance:
+    - Step-by-step instructions for: cloning a sample target repo,
+      running `orch doctor`, building the sandbox image, submitting a
+      small canned request (e.g. "add a function `add(a, b)` to
+      `calc.py` with a unit test"), and starting `orch run`.
+    - Documents how to authenticate the Gemini and Codex CLIs (links to
+      the upstream docs; Orchestra does not own those credentials).
+    - Lists the artifacts to inspect after a successful run:
+      `.orch/plans/`, `.orch/tasks/done/`, `.orch/patches/`,
+      `.orch/logs/`, and the resulting merge commit on `main`.
+    - Documents the kill switch: how to stop the loop, what state is
+      safe to delete between runs, and how `startup_reconcile` resumes
+      partial work.
+
+After T-0018…T-0023 land, a user with valid Gemini and Codex credentials
+and a working Docker daemon should be able to clone Orchestra, run
+`orch doctor`, `orch image build`, `orch submit "..."`, and `orch run`,
+and watch a small change land on `main` of a target repo. That is the
+bar for "first test drive."

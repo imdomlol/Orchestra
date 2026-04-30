@@ -7,16 +7,21 @@ from datetime import UTC, datetime
 import os
 from pathlib import Path
 import subprocess
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from orch.config import OrchestraConfig, RuntimeConfig, load_config
 from orch.dispatcher import DispatchResult, Dispatcher
 from orch.inbox import Inbox, InboxMessage
 from orch.merge import MergeDriver, MergeResult
+from orch.model_wrapper import ModelWrapper, WrapperResult
 from orch.plans import PlanIngestResult, PlanIngestor
 from orch.review import CriticDispatchResult, ReviewDispatcher
 from orch.task_store import ReviewNote, TaskStore
+
+
+class RoleRunner(Protocol):
+    def run_role(self, role: str, **context: Any) -> WrapperResult: ...
 
 
 @dataclass(frozen=True)
@@ -39,6 +44,7 @@ class RunOnceResult:
     message: str
     dispatch: DispatchResult | None = None
     critic_dispatch: CriticDispatchResult | None = None
+    planner_result: WrapperResult | None = None
     inbox_message: InboxMessage | None = None
     plan_ingest: PlanIngestResult | None = None
     merge_result: MergeResult | None = None
@@ -58,6 +64,7 @@ class OrchestraRuntime:
         plan_ingestor: PlanIngestor | None = None,
         review_dispatcher: ReviewDispatcher | None = None,
         merge_driver: MergeDriver | None = None,
+        model_wrapper: RoleRunner | None = None,
     ) -> None:
         self.root = root.resolve()
         self.runtime_config = runtime_config
@@ -82,6 +89,7 @@ class OrchestraRuntime:
             root=self.root,
             task_store=self.task_store,
         )
+        self.model_wrapper = model_wrapper
 
     @classmethod
     def from_config(
@@ -143,20 +151,7 @@ class OrchestraRuntime:
     def _handle_orchestrator_message(self, message: InboxMessage) -> RunOnceResult:
         action = message.body.get("action")
         if action == "submit_request":
-            self.inbox.ack(message)
-            dispatch = self.dispatcher.dispatch_next()
-            if dispatch is None:
-                return RunOnceResult(
-                    kind="request_recorded",
-                    message="request recorded; no ready task",
-                    inbox_message=message,
-                )
-            return RunOnceResult(
-                kind="dispatched",
-                message=f"dispatched {dispatch.task_id}",
-                dispatch=dispatch,
-                inbox_message=message,
-            )
+            return self._handle_submit_request(message)
         if action == "reject_plan":
             self.inbox.ack(message)
             return RunOnceResult(
@@ -165,26 +160,7 @@ class OrchestraRuntime:
                 inbox_message=message,
             )
         if action == "planned":
-            plan_path = message.body.get("plan_path")
-            if not isinstance(plan_path, str) or not plan_path.strip():
-                raise ValueError("planned message must include plan_path")
-            ingest = self.plan_ingestor.ingest(plan_path)
-            self.inbox.ack(message)
-            dispatch = self.dispatcher.dispatch_next()
-            if dispatch is not None:
-                return RunOnceResult(
-                    kind="dispatched",
-                    message=f"ingested {ingest.task_count} tasks; dispatched {dispatch.task_id}",
-                    dispatch=dispatch,
-                    inbox_message=message,
-                    plan_ingest=ingest,
-                )
-            return RunOnceResult(
-                kind="plan_ingested",
-                message=f"ingested {ingest.task_count} tasks",
-                inbox_message=message,
-                plan_ingest=ingest,
-            )
+            return self._handle_planned(message)
         if action == "worker_completed":
             task_id = message.body.get("task_id")
             if not isinstance(task_id, str) or not task_id.strip():
@@ -206,6 +182,85 @@ class OrchestraRuntime:
             message=f"ignored unsupported action: {action!r}",
             inbox_message=message,
         )
+
+    def _handle_submit_request(self, message: InboxMessage) -> RunOnceResult:
+        request_path = message.body.get("request_path")
+        if not isinstance(request_path, str) or not request_path.strip():
+            raise ValueError("submit_request message must include request_path")
+
+        planner_wrapper = self.model_wrapper or ModelWrapper(
+            root=self.root,
+            inbox=self.inbox,
+        )
+        planner = planner_wrapper.run_role(
+            "gemini-planner",
+            request_path=request_path,
+            log_name=Path(request_path).stem,
+            inbox_role="orchestrator",
+        )
+        if not planner.process.succeeded:
+            self.inbox.ack(message)
+            return RunOnceResult(
+                kind="planning_failed",
+                message="planner exited unsuccessfully",
+                planner_result=planner,
+                inbox_message=message,
+            )
+        if planner.handoff is None or planner.handoff_path is None:
+            self.inbox.ack(message)
+            return RunOnceResult(
+                kind="planning_failed",
+                message="planner did not emit an Orchestra handoff",
+                planner_result=planner,
+                inbox_message=message,
+            )
+
+        planned_message = self.inbox.read_path(planner.handoff_path)
+        if planned_message.body.get("action") != "planned":
+            self.inbox.ack(message)
+            self.inbox.ack(planned_message)
+            return RunOnceResult(
+                kind="planning_failed",
+                message="planner handoff was not a planned action",
+                planner_result=planner,
+                inbox_message=message,
+            )
+
+        ingest = self._ingest_planned_message(planned_message)
+        self.inbox.ack(message)
+        self.inbox.ack(planned_message)
+        return RunOnceResult(
+            kind="plan_ingested",
+            message=f"planned and ingested {ingest.task_count} tasks",
+            planner_result=planner,
+            inbox_message=message,
+            plan_ingest=ingest,
+        )
+
+    def _handle_planned(self, message: InboxMessage) -> RunOnceResult:
+        ingest = self._ingest_planned_message(message)
+        self.inbox.ack(message)
+        dispatch = self.dispatcher.dispatch_next()
+        if dispatch is not None:
+            return RunOnceResult(
+                kind="dispatched",
+                message=f"ingested {ingest.task_count} tasks; dispatched {dispatch.task_id}",
+                dispatch=dispatch,
+                inbox_message=message,
+                plan_ingest=ingest,
+            )
+        return RunOnceResult(
+            kind="plan_ingested",
+            message=f"ingested {ingest.task_count} tasks",
+            inbox_message=message,
+            plan_ingest=ingest,
+        )
+
+    def _ingest_planned_message(self, message: InboxMessage) -> PlanIngestResult:
+        plan_path = message.body.get("plan_path")
+        if not isinstance(plan_path, str) or not plan_path.strip():
+            raise ValueError("planned message must include plan_path")
+        return self.plan_ingestor.ingest(plan_path)
 
     def _handle_critic_reviewed(self, message: InboxMessage) -> RunOnceResult:
         body = message.body
@@ -401,6 +456,12 @@ def result_to_dict(result: RunOnceResult) -> dict[str, Any]:
         data["task_path"] = str(result.critic_dispatch.task_path)
         data["diff_path"] = str(result.critic_dispatch.diff_path)
         data["message_path"] = str(result.critic_dispatch.message_path)
+    if result.planner_result is not None:
+        data["planner_returncode"] = result.planner_result.process.returncode
+        data["planner_stdout_path"] = str(result.planner_result.process.stdout_path)
+        data["planner_stderr_path"] = str(result.planner_result.process.stderr_path)
+        if result.planner_result.handoff_path is not None:
+            data["planner_handoff_path"] = str(result.planner_result.handoff_path)
     if result.inbox_message is not None:
         data["inbox_message"] = str(result.inbox_message.path)
     if result.plan_ingest is not None:

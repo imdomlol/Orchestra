@@ -8,6 +8,8 @@ import yaml
 
 from orch.config import RuntimeConfig
 from orch.inbox import Inbox
+from orch.model_wrapper import WrapperResult
+from orch.runner import ProcessResult
 from orch.runtime import OrchestraRuntime
 from orch.task_store import TaskStore
 
@@ -67,6 +69,58 @@ def runtime(repo: Path) -> OrchestraRuntime:
     )
 
 
+def process_result(
+    repo: Path,
+    *,
+    returncode: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+) -> ProcessResult:
+    log_dir = repo / ".orch/logs/planner"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = log_dir / "planner.stdout"
+    stderr_path = log_dir / "planner.stderr"
+    stdout_path.write_text(stdout, encoding="utf-8")
+    stderr_path.write_text(stderr, encoding="utf-8")
+    return ProcessResult(
+        argv=("fake-planner",),
+        cwd=repo,
+        returncode=returncode,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        timed_out=False,
+        duration_seconds=0.01,
+    )
+
+
+class FakePlannerWrapper:
+    def __init__(self, result: WrapperResult) -> None:
+        self.result = result
+        self.calls: list[dict] = []
+
+    def run_role(self, role: str, **context) -> WrapperResult:
+        self.calls.append({"role": role, **context})
+        return self.result
+
+
+def planner_result(
+    repo: Path,
+    *,
+    handoff: dict | None,
+    returncode: int = 0,
+    stderr: str = "",
+) -> WrapperResult:
+    handoff_path = None
+    if handoff is not None:
+        handoff_path = Inbox(repo).post("orchestrator", handoff)
+    return WrapperResult(
+        role="gemini-planner",
+        process=process_result(repo, returncode=returncode, stderr=stderr),
+        handoff_path=handoff_path,
+        handoff=handoff,
+    )
+
+
 def test_submit_writes_request_and_posts_orchestrator_nudge(tmp_path: Path) -> None:
     repo = init_repo(tmp_path)
     copy_runtime_layout(repo)
@@ -101,21 +155,107 @@ def test_run_once_processes_oldest_inbox_before_dispatch(tmp_path: Path) -> None
     assert len(inbox.list_messages("orchestrator")) == 1
 
 
-def test_run_once_dispatches_ready_task_after_submit_message(tmp_path: Path) -> None:
+def test_run_once_invokes_planner_and_ingests_plan(tmp_path: Path) -> None:
     repo = init_repo(tmp_path)
     copy_runtime_layout(repo)
-    store = TaskStore(repo)
-    store.write_pending(load_task())
+    task = load_task()
+    plan_path = repo / ".orch/plans/P-0001.md"
+    plan_path.write_text(
+        f"# Plan\n\n```yaml\n{yaml.safe_dump(task, sort_keys=False)}```",
+        encoding="utf-8",
+    )
     inbox = Inbox(repo)
-    inbox.post("orchestrator", {"action": "submit_request", "request_path": ".orch/requests/R.md"})
+    inbox.post(
+        "orchestrator",
+        {"action": "submit_request", "request_path": ".orch/requests/R.md"},
+    )
+    wrapper = FakePlannerWrapper(
+        planner_result(
+            repo,
+            handoff={"action": "planned", "plan_path": ".orch/plans/P-0001.md"},
+        )
+    )
 
-    result = runtime(repo).run_once()
+    result = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        model_wrapper=wrapper,
+    ).run_once()
 
-    assert result.kind == "dispatched"
-    assert result.dispatch is not None
-    assert result.dispatch.task_id == "T-0001"
-    assert store.read("T-0001")["status"] == "in_progress"
-    assert inbox.read_next("worker") is not None
+    assert result.kind == "plan_ingested"
+    assert result.plan_ingest is not None
+    assert result.plan_ingest.task_count == 1
+    assert result.dispatch is None
+    assert TaskStore(repo).read("T-0001")["status"] == "pending"
+    assert inbox.read_next("worker") is None
+    assert inbox.read_next("orchestrator") is None
+    assert wrapper.calls == [
+        {
+            "role": "gemini-planner",
+            "request_path": ".orch/requests/R.md",
+            "log_name": "R",
+            "inbox_role": "orchestrator",
+        }
+    ]
+
+
+def test_run_once_planner_missing_handoff_acks_request(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    inbox = Inbox(repo)
+    inbox.post(
+        "orchestrator",
+        {"action": "submit_request", "request_path": ".orch/requests/R.md"},
+    )
+    wrapper = FakePlannerWrapper(planner_result(repo, handoff=None))
+
+    result = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        model_wrapper=wrapper,
+    ).run_once()
+
+    assert result.kind == "planning_failed"
+    assert "handoff" in result.message
+    assert inbox.read_next("orchestrator") is None
+
+
+def test_run_once_planner_nonzero_acks_request_and_preserves_logs(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    inbox = Inbox(repo)
+    inbox.post(
+        "orchestrator",
+        {"action": "submit_request", "request_path": ".orch/requests/R.md"},
+    )
+    wrapper = FakePlannerWrapper(
+        planner_result(repo, handoff=None, returncode=2, stderr="planner exploded\n")
+    )
+
+    result = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        model_wrapper=wrapper,
+    ).run_once()
+
+    assert result.kind == "planning_failed"
+    assert result.planner_result is not None
+    assert (
+        result.planner_result.process.stderr_path.read_text(encoding="utf-8")
+        == "planner exploded\n"
+    )
     assert inbox.read_next("orchestrator") is None
 
 
