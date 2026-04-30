@@ -13,6 +13,8 @@ import threading
 from orch.doctor import Doctor
 from orch.images import SandboxImageBuilder
 
+OrchestraRuntime = None
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
@@ -102,9 +104,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _runtime_api():
-    from orch.runtime import OrchestraRuntime, result_to_dict
+    from orch.runtime import OrchestraRuntime as RuntimeClass, result_to_dict
 
-    return OrchestraRuntime, result_to_dict
+    runtime_class = OrchestraRuntime or RuntimeClass
+    return runtime_class, result_to_dict
 
 
 def _print_run_result(result: object) -> None:
