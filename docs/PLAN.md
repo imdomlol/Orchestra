@@ -5,8 +5,8 @@ single source of truth for the project's design and scope. Other models and
 contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
-**Status:** design complete; substrate tasks T-0001…T-0021 implemented and
-tested (82 passing tests). T-0018 planner auto-invocation is now wired:
+**Status:** design complete; substrate tasks T-0001…T-0022 implemented and
+tested (87 passing tests). T-0018 planner auto-invocation is now wired:
 `submit_request` invokes the planner wrapper, consumes its `planned`
 handoff, and ingests validated pending tasks without manual wrapper
 execution. T-0019 agent-driver invocation is also wired: `run_once`
@@ -21,9 +21,9 @@ dispatch, worker→critic handoff, and critic verdict routing through
 `MergeDriver`, rework, escalation, or abandonment — is in place and
 exercised by the unit suite.
 
-What is **not** yet wired: an `orch doctor` preflight and a first-drive
-runbook. Those pieces are the work required before a user can do a real
-end-to-end test drive — captured as T-0022…T-0023 in §14.
+What is **not** yet wired: a first-drive runbook. That piece is the work
+required before a user can do a real end-to-end test drive — captured as
+T-0023 in §14.
 
 ---
 
@@ -247,9 +247,8 @@ authoritative; in-memory state is not.
 
 ## 11. What's Built vs What's Designed
 
-**Designed only (this doc):** an `orch doctor` preflight and the
-first-drive runbook. See §14 for the concrete tasks required to enable a
-first end-to-end test drive.
+**Designed only (this doc):** the first-drive runbook. See §14 for the
+concrete task required to enable a first end-to-end test drive.
 
 **Implemented runtime tasks:**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
@@ -466,15 +465,15 @@ first end-to-end test drive.
 
 ## 14. First Test Drive — Required Implementation
 
-T-0001…T-0021 give us a working substrate, but several pieces sit between
+T-0001…T-0022 give us a working substrate, but one piece sits between
 "unit tests pass" and "Orchestra autonomously lands a small change on a
 throwaway repo." This section enumerates the discrete tasks required
 before a user can perform a first real end-to-end run.
 
 The shape of the remaining gap: `run_once` now spawns the planner,
 worker, critic, and integrator wrappers, and `orch run` continuously
-polls that substrate with budget caps. Preflight checks and kill switch
-documentation are not yet in place. T-0022…T-0023 close that gap.
+polls that substrate with budget caps. Preflight checks are now in place;
+kill switch and first-drive documentation remain for T-0023.
 
 **T-0018 planner-auto-invocation — implemented**
   - Objective: When the runtime processes a `submit_request` message,
@@ -541,7 +540,7 @@ documentation are not yet in place. T-0022…T-0023 close that gap.
     - Budget rejections leave inbox state recoverable so a follow-up run
       with raised budgets can resume the request.
 
-**T-0022 doctor-preflight**
+**T-0022 doctor-preflight — implemented**
   - Objective: Add `orch doctor` to verify the local environment before
     a first run.
   - Owned files: `orch/cli.py`, `orch/doctor.py`,

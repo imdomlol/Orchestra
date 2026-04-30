@@ -10,6 +10,7 @@ import signal
 import sys
 import threading
 
+from orch.doctor import Doctor
 from orch.images import SandboxImageBuilder
 from orch.runtime import OrchestraRuntime, RunOnceResult, result_to_dict
 
@@ -60,6 +61,11 @@ def main(argv: list[str] | None = None) -> int:
                     print(result.stderr, end="", file=sys.stderr)
                 return 0 if result.succeeded else result.returncode
             parser.error("image requires a subcommand")
+        if args.command == "doctor":
+            report = Doctor.from_config(root=args.root).run()
+            for line in report.lines():
+                print(line)
+            return 0 if report.passed else 1
         parser.print_help()
         return 2
     except Exception as exc:
@@ -89,6 +95,8 @@ def _build_parser() -> argparse.ArgumentParser:
     build.add_argument("--print", action="store_true", help="print the docker build command")
     build.add_argument("--no-cache", action="store_true", help="pass --no-cache to docker build")
     build.add_argument("--pull", action="store_true", help="pass --pull to docker build")
+
+    subparsers.add_parser("doctor", help="check local prerequisites")
     return parser
 
 

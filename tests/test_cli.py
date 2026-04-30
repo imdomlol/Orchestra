@@ -6,6 +6,7 @@ import subprocess
 
 import orch.cli as cli
 from orch.cli import main
+from orch.doctor import DoctorCheck, DoctorReport
 from orch.inbox import Inbox
 from orch.runtime import RunLoopResult, RunOnceResult
 
@@ -109,3 +110,31 @@ def test_image_build_prints_configured_docker_command(tmp_path: Path, capsys) ->
     assert "--tag orchestra-sandbox:py3.12" in output
     assert "--pull" in output
     assert str(repo / "docker/orchestra-sandbox.Dockerfile") in output
+
+
+def test_doctor_cli_prints_checks_and_sets_exit_code(tmp_path: Path, capsys, monkeypatch) -> None:
+    repo = init_repo(tmp_path)
+    copy_configured_layout(repo)
+
+    class FakeDoctor:
+        @classmethod
+        def from_config(cls, *, root: Path):
+            assert root == repo
+            return cls()
+
+        def run(self):
+            return DoctorReport(
+                (
+                    DoctorCheck("gemini CLI", True, "gemini 1.0"),
+                    DoctorCheck("docker daemon", False, "daemon unavailable"),
+                )
+            )
+
+    monkeypatch.setattr(cli, "Doctor", FakeDoctor)
+
+    code = main(["--root", str(repo), "doctor"])
+
+    output = capsys.readouterr().out
+    assert code == 1
+    assert "PASS gemini CLI: gemini 1.0" in output
+    assert "FAIL docker daemon: daemon unavailable" in output

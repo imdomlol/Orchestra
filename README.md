@@ -13,15 +13,14 @@ This README is the user guide. For architecture and the task roadmap, see
 
 ## Status at a glance
 
-- Substrate complete: T-0001 through T-0020 (78 passing tests).
+- Substrate complete: T-0001 through T-0022 (87 passing tests).
 - The full local pipeline — request → plan ingest → worker dispatch →
   critic handoff → merge — is wired and tested with mocked subprocesses.
 - `orch run` now continuously invokes the planner, worker, critic, and
   integrator wrappers as role inbox messages become actionable; use
   `Ctrl-C` or SIGTERM for clean shutdown.
-- **Not yet wired:** budget enforcement, `orch doctor`, and the
-  first-drive runbook. Those are tracked as T-0021…T-0023 in
-  [PLAN.md §14](docs/PLAN.md). Until those land,
+- **Not yet wired:** the first-drive runbook. That is tracked as T-0023 in
+  [PLAN.md §14](docs/PLAN.md). Until that lands,
   Orchestra is best treated as a substrate to develop against, not a
   hands-off autopilot.
 
@@ -79,7 +78,14 @@ uv run --extra dev pytest -v
 
 ## First-time setup
 
-1. **Build the sandbox image.** Tasks and integration checks run inside
+1. **Run the preflight.** This checks configured model CLIs, Docker,
+   git identity, schema validation, and the expected `.orch/` layout.
+
+   ```bash
+   orch doctor
+   ```
+
+2. **Build the sandbox image.** Tasks and integration checks run inside
    a Docker container by default. The image and Dockerfile are
    configured in `.orch/config/orchestrator.toml`.
 
@@ -93,7 +99,7 @@ uv run --extra dev pytest -v
    orch image build --print
    ```
 
-2. **Confirm the model CLIs are reachable.**
+3. **Confirm the model CLIs are authenticated.**
 
    ```bash
    gemini --version
@@ -102,7 +108,7 @@ uv run --extra dev pytest -v
 
    Both must succeed from the same shell where you'll run `orch`.
 
-3. **Skim the config files** under `.orch/config/`:
+4. **Skim the config files** under `.orch/config/`:
    - `orchestrator.toml` — model bindings, CLI commands, sandbox
      settings, runtime concurrency, budgets.
    - `policies.toml` — forbidden globs and default allowed commands
@@ -111,8 +117,7 @@ uv run --extra dev pytest -v
 
    The defaults are sensible for local use. Pay attention to
    `[runtime] max_workers` (default 1; serial-by-default), `max_retries`
-   (critic and integration retry cap), and the `[budgets]` section
-   (currently parsed but not yet enforced — see PLAN.md §14 T-0021).
+   (critic and integration retry cap), and the `[budgets]` section.
 
 ---
 
@@ -330,9 +335,8 @@ tests/         pytest suite (one file per module)
 - The sandbox boundary is the Docker daemon. Anyone with Docker access
   on the host is effectively privileged; treat this as a practical
   isolation layer, not a multi-tenant security boundary.
-- Budgets are not yet enforced. Until T-0021 lands, do not point
-  Orchestra at a repo you care about — a runaway plan could spawn many
-  tasks. Use a throwaway target repo.
+- Budgets are enforced, but the first-drive runbook is not written yet.
+  Until T-0023 lands, use a throwaway target repo for unattended runs.
 - The orchestrator (Claude) never edits source. Workers may only edit
   files matching their task's `owned_files`, enforced by a per-worktree
   pre-commit hook.
