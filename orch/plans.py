@@ -108,5 +108,21 @@ def extract_task_blocks(markdown: str) -> list[dict[str, Any]]:
         if not isinstance(data, dict):
             continue
         if isinstance(data.get("id"), str) and data["id"].startswith("T-"):
+            _normalize_task_text_lists(data)
             tasks.append(data)
     return tasks
+
+
+def _normalize_task_text_lists(task: dict[str, Any]) -> None:
+    for key in ("risks",):
+        values = task.get(key)
+        if not isinstance(values, list):
+            continue
+        task[key] = [_coerce_text_list_item(value) for value in values]
+
+
+def _coerce_text_list_item(value: Any) -> Any:
+    if isinstance(value, dict) and len(value) == 1:
+        item_key, item_value = next(iter(value.items()))
+        return f"{item_key}: {item_value}"
+    return value

@@ -576,3 +576,56 @@ and a working Docker daemon should be able to follow `docs/RUNBOOK.md`, run
 `orch doctor`, `orch image build`, `orch submit "..."`, and `orch run`, and
 watch a small change land on `main` of a throwaway target repo. That is the
 bar for "first test drive."
+
+---
+
+## Known Issues
+
+### BUG-001 — Gemini CLI is an agentic loop, not a single-call tool
+
+**Symptom:** `orch run --once` always hits `TerminalQuotaError` (daily quota
+exhausted) on the first Gemini planner call, every session, without ever
+producing a plan. The free-tier limit is 20 requests per day for
+`gemini-3-flash` (Gemini 2.5 Flash).
+
+**Root cause — architectural mismatch:** `model_wrapper.py` treats the
+`gemini` CLI as a simple, one-shot inference tool: send prompt via stdin,
+get response, done. In reality the Gemini CLI is a **full agentic loop**
+(analogous to Claude Code). When invoked with `-p "..."`, it starts a
+multi-turn agent session that autonomously decides to use tools — file reads,
+GrepTool, ripgrep, etc. — to explore the workspace before producing output.
+Evidence from log output:
+
+```
+Ripgrep is not available. Falling back to GrepTool.
+TerminalQuotaError: You have exhausted your daily quota on this model.
+```
+
+Every tool call and every agent turn is a **separate API request**. A single
+planning invocation likely costs 5–20 API requests depending on how much the
+agent explores the codebase. The free-tier daily cap of 20 total requests is
+therefore exhausted within one or two real runs, and every subsequent
+invocation in the same calendar day hits the error immediately.
+
+**Why it has never worked:** The quota was burned by the very first real
+planning session (or earlier exploratory testing). No single run has ever
+stayed within the 20-request daily budget because the agentic tool loop
+consumes far more than 1 request per invocation.
+
+**Files affected:** `orch/model_wrapper.py` (`ROLE_SPECS`, invocation model
+for `gemini-planner` and `gemini-critic`).
+
+**Fix directions (pick one):**
+1. **Use the Gemini API SDK directly** (e.g. `google-generativeai` Python
+   library) instead of the Gemini CLI. A direct SDK call = exactly 1 API
+   request per invocation, no agentic loop, no tool calls.
+2. **Upgrade to a paid Gemini API key.** The per-minute and per-day limits
+   are high enough that agentic usage becomes practical, but this does not
+   fix the underlying "more calls than expected" behaviour.
+3. **Constrain the Gemini CLI's tool use** via a policy file or
+   `--allowed-tools` flag so it cannot make additional tool calls during
+   headless operation, forcing single-turn behaviour.
+
+Option 1 is the cleanest fix for the local MVP: a thin Python wrapper that
+calls the Gemini SDK once with the composed prompt and writes the response to
+stdout in the same format `extract_handoff` already expects.

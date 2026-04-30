@@ -12,7 +12,7 @@ def test_loads_default_config() -> None:
     config = load_config()
 
     assert config.models.orchestrator == "claude-opus"
-    assert config.cli.gemini == "gemini"
+    assert config.cli.gemini == "python -m orch.gemini_sdk_runner"
     assert config.runtime.max_workers == 1
     assert config.runtime.poll_interval_seconds == 2
     assert config.sandbox.mode == "docker"

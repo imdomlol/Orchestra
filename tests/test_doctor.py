@@ -30,8 +30,8 @@ def test_doctor_passes_when_environment_is_ready(tmp_path: Path) -> None:
     copy_preflight_files(tmp_path)
 
     def runner(argv: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
-        if argv[:2] == ("gemini", "--version"):
-            return completed(argv, stdout="gemini 1.2.3\n")
+        if argv[:3] == ("python", "-m", "orch.gemini_sdk_runner"):
+            return completed(argv, stdout="gemini_sdk_runner 1.0.0\n")
         if argv[:2] == ("codex", "--version"):
             return completed(argv, stdout="codex 5.5\n")
         if argv[:2] == ("docker", "version"):
@@ -88,16 +88,20 @@ def test_doctor_reports_missing_cli_and_dirs(tmp_path: Path) -> None:
             return completed(argv, stdout="test@example.local\n")
         return completed(argv, stdout="ok\n")
 
-    def which(executable: str) -> str | None:
-        if executable == "gemini":
-            return None
-        return f"/bin/{executable}"
+    def runner_with_gemini_fail(argv: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
+        if argv == ("git", "config", "user.name"):
+            return completed(argv, stdout="Test User\n")
+        if argv == ("git", "config", "user.email"):
+            return completed(argv, stdout="test@example.local\n")
+        if argv[:3] == ("python", "-m", "orch.gemini_sdk_runner"):
+            return completed(argv, returncode=1, stderr="GEMINI_API_KEY is not set\n")
+        return completed(argv, stdout="ok\n")
 
-    report = Doctor(tmp_path, runner=runner, which=which).run()
+    report = Doctor(tmp_path, runner=runner_with_gemini_fail, which=lambda e: f"/bin/{e}").run()
 
     assert not report.passed
     lines = report.lines()
-    assert any(line == "FAIL gemini CLI: 'gemini' is not on PATH" for line in lines)
+    assert any(line.startswith("FAIL gemini CLI:") for line in lines)
     assert any(line.startswith("FAIL orch directories: missing .orch/tasks/pending") for line in lines)
 
 

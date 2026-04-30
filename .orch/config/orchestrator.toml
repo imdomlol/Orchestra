@@ -6,7 +6,7 @@ worker = "codex-gpt-5.5"
 integrator = "codex-gpt-5.5"
 
 [cli]
-gemini = "gemini"
+gemini = "python -m orch.gemini_sdk_runner"
 codex = "codex"
 
 [runtime]

@@ -326,6 +326,34 @@ class OrchestraRuntime:
         if not isinstance(request_path, str) or not request_path.strip():
             raise ValueError("submit_request message must include request_path")
 
+        existing_plan = self._find_planned_for_request(request_path)
+        if existing_plan is not None:
+            try:
+                ingest = self._ingest_planned_message(existing_plan)
+            except PlanBudgetExceeded as exc:
+                self.inbox.ack(message)
+                self._record_budget_exceeded(
+                    "max_tasks_per_request",
+                    {
+                        "limit": exc.max_tasks,
+                        "actual": exc.task_count,
+                        "plan_message": str(existing_plan.path.relative_to(self.root)),
+                    },
+                )
+                return RunOnceResult(
+                    kind="budget_exceeded",
+                    message=str(exc),
+                    inbox_message=existing_plan,
+                )
+            self.inbox.ack(message)
+            self.inbox.ack(existing_plan)
+            return RunOnceResult(
+                kind="plan_ingested",
+                message=f"planned and ingested {ingest.task_count} tasks",
+                inbox_message=message,
+                plan_ingest=ingest,
+            )
+
         planner_wrapper = self.model_wrapper or ModelWrapper(
             root=self.root,
             inbox=self.inbox,
@@ -410,6 +438,15 @@ class OrchestraRuntime:
             plan_ingest=ingest,
         )
 
+    def _find_planned_for_request(self, request_path: str) -> InboxMessage | None:
+        for candidate in self.inbox.list_messages("orchestrator"):
+            if candidate.body.get("action") != "planned":
+                continue
+            candidate_request = candidate.body.get("request_path")
+            if candidate_request == request_path:
+                return candidate
+        return None
+
     def _handle_planned(self, message: InboxMessage) -> RunOnceResult:
         try:
             ingest = self._ingest_planned_message(message)
@@ -490,10 +527,31 @@ class OrchestraRuntime:
         plan_path = message.body.get("plan_path")
         if not isinstance(plan_path, str) or not plan_path.strip():
             raise ValueError("planned message must include plan_path")
+        self._materialize_planned_content(message, plan_path)
         return self.plan_ingestor.ingest(
             plan_path,
             max_tasks=self.budget_config.max_tasks_per_request,
         )
+
+    def _materialize_planned_content(self, message: InboxMessage, plan_path: str) -> None:
+        plan_content = message.body.get("plan_content")
+        if not isinstance(plan_content, str) or not plan_content:
+            return
+
+        path = Path(plan_path)
+        if path.is_absolute():
+            resolved_plan = path.resolve()
+        else:
+            resolved_plan = (self.root / path).resolve()
+        plans_root = (self.root / ".orch" / "plans").resolve()
+        try:
+            resolved_plan.relative_to(plans_root)
+        except ValueError as exc:
+            raise ValueError(f"plan path is outside .orch/plans: {plan_path}") from exc
+
+        if not resolved_plan.exists():
+            resolved_plan.parent.mkdir(parents=True, exist_ok=True)
+            resolved_plan.write_text(plan_content, encoding="utf-8")
 
     def _record_budget_exceeded(self, budget: str, payload: dict[str, Any]) -> Path:
         return self._append_orchestrator_log(

@@ -53,6 +53,25 @@ objective: Do the thing.
     assert extract_task_blocks(markdown) == [{"id": "T-0001", "objective": "Do the thing."}]
 
 
+def test_extract_task_blocks_normalizes_mapping_shaped_risks() -> None:
+    markdown = """
+```yaml
+id: T-0001
+objective: Do the thing.
+risks:
+  - Minor: existing tests may need updating
+```
+"""
+
+    assert extract_task_blocks(markdown) == [
+        {
+            "id": "T-0001",
+            "objective": "Do the thing.",
+            "risks": ["Minor: existing tests may need updating"],
+        }
+    ]
+
+
 def test_ingest_writes_embedded_tasks_to_pending(tmp_path: Path) -> None:
     copy_runtime_layout(tmp_path)
     plan_path = tmp_path / ".orch/plans/P-0001.md"

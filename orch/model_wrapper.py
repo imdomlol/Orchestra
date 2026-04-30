@@ -5,8 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import shlex
-from typing import Any
+from typing import Any, Callable
+
+import yaml
 
 from orch.config import OrchestraConfig, load_config
 from orch.inbox import Inbox
@@ -19,14 +22,12 @@ ROLE_SPECS = {
         "cli": "gemini",
         "model": "planner",
         "log_role": "planner",
-        "headless_args": ["-p", ""],
     },
     "gemini-critic": {
         "prompt": "gemini-critic.md",
         "cli": "gemini",
         "model": "critic",
         "log_role": "critic",
-        "headless_args": ["-p", ""],
     },
     "claude-planner": {
         "prompt": "gemini-planner.md",
@@ -107,6 +108,7 @@ class ModelWrapper:
         if process.stdout_path.exists():
             handoff = extract_handoff(process.stdout_path.read_text(encoding="utf-8"))
         if handoff is not None:
+            handoff = self._prepare_planner_handoff(role, handoff)
             handoff.setdefault("role", role)
             handoff_path = self.inbox.post(inbox_role, handoff)
 
@@ -193,6 +195,73 @@ class ModelWrapper:
     def _stringify_paths(self, context: dict[str, Any]) -> dict[str, Any]:
         return {key: str(value) if isinstance(value, Path) else value for key, value in context.items()}
 
+    def _prepare_planner_handoff(self, role: str, handoff: dict[str, Any]) -> dict[str, Any]:
+        if not role.endswith("-planner"):
+            return handoff
+
+        prepared = dict(handoff)
+        prepared.setdefault("action", "planned")
+        tasks = prepared.get("tasks")
+        plan_path = prepared.get("plan_path")
+        plan_content = prepared.get("plan_content")
+        if isinstance(plan_path, str) and plan_path.strip() and isinstance(plan_content, str):
+            resolved_plan = self._resolve_plan_artifact(plan_path)
+            if resolved_plan is not None and not resolved_plan.exists():
+                resolved_plan.parent.mkdir(parents=True, exist_ok=True)
+                resolved_plan.write_text(plan_content, encoding="utf-8")
+                prepared["plan_written"] = True
+                prepared.pop("plan_write_error", None)
+            if resolved_plan is not None:
+                prepared.pop("plan_content", None)
+        elif isinstance(tasks, list) and tasks and isinstance(plan_path, str) and plan_path.strip():
+            resolved_plan = self._resolve_plan_artifact(plan_path)
+            if resolved_plan is not None and not resolved_plan.exists():
+                resolved_plan.parent.mkdir(parents=True, exist_ok=True)
+                resolved_plan.write_text(self._render_plan_artifact(prepared), encoding="utf-8")
+                prepared["plan_written"] = True
+                prepared.pop("plan_write_error", None)
+        prepared.pop("tasks", None)
+        return prepared
+
+    def _resolve_plan_artifact(self, plan_path: str) -> Path | None:
+        path = Path(plan_path)
+        if path.is_absolute():
+            resolved = path.resolve()
+        else:
+            resolved = (self.root / path).resolve()
+        plans_root = (self.root / ".orch" / "plans").resolve()
+        try:
+            resolved.relative_to(plans_root)
+        except ValueError:
+            return None
+        return resolved
+
+    def _render_plan_artifact(self, handoff: dict[str, Any]) -> str:
+        title = Path(str(handoff.get("plan_path", "planner-output"))).stem
+        lines = [f"# {title}", ""]
+
+        assumptions = handoff.get("assumptions")
+        if isinstance(assumptions, list) and assumptions:
+            lines.extend(["## Assumptions", ""])
+            lines.extend(f"- {assumption}" for assumption in assumptions)
+            lines.append("")
+
+        risks = handoff.get("risks")
+        if isinstance(risks, list) and risks:
+            lines.extend(["## Risks", ""])
+            lines.extend(f"- {risk}" for risk in risks)
+            lines.append("")
+
+        lines.extend(["## Tasks", ""])
+        for task in handoff["tasks"]:
+            if not isinstance(task, dict):
+                continue
+            lines.append("```yaml")
+            lines.append(yaml.safe_dump(task, sort_keys=False).rstrip())
+            lines.append("```")
+            lines.append("")
+        return "\n".join(lines)
+
 
 def extract_handoff(output: str) -> dict[str, Any] | None:
     """Extract a JSON handoff from model stdout."""
@@ -200,22 +269,51 @@ def extract_handoff(output: str) -> dict[str, Any] | None:
     stripped = output.strip()
     if not stripped:
         return None
+
+    data = _decode_json_object(stripped)
+    if data is not None:
+        return data
+
+    marker_index = stripped.rfind("ORCH_HANDOFF:")
+    if marker_index != -1:
+        data = _decode_first_json_object(stripped[marker_index + len("ORCH_HANDOFF:"):])
+        if data is not None:
+            return data
+
+    for match in reversed(list(re.finditer(r"```(?:json)?\s*\n(.*?)\n```", stripped, re.DOTALL | re.IGNORECASE))):
+        data = _decode_json_object(match.group(1))
+        if data is not None:
+            return data
+
     for line in reversed(stripped.splitlines()):
         candidate = line.strip()
         if candidate.startswith("ORCH_HANDOFF:"):
             candidate = candidate.removeprefix("ORCH_HANDOFF:").strip()
-        if not candidate.startswith("{"):
-            continue
-        try:
-            data = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
+        data = _decode_json_object(candidate)
+        if data is not None:
             return data
+    return None
+
+
+def _decode_json_object(candidate: str) -> dict[str, Any] | None:
     try:
-        data = json.loads(stripped)
+        data = json.loads(candidate.strip())
     except json.JSONDecodeError:
         return None
     if isinstance(data, dict):
         return data
+    return None
+
+
+def _decode_first_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
     return None

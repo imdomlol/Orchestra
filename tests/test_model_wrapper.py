@@ -2,22 +2,32 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import re
 import shutil
 import sys
 
 from orch.inbox import Inbox
 from orch.model_wrapper import ModelWrapper, extract_handoff
+from orch.plans import extract_task_blocks
 from orch.wrapper_cli import planner_main
 
 
-def copy_config(repo: Path, *, gemini: str | None = None, codex: str | None = None) -> None:
+def copy_config(
+    repo: Path,
+    *,
+    gemini: str | None = None,
+    codex: str | None = None,
+    claude: str | None = None,
+) -> None:
     shutil.copytree(".orch/config", repo / ".orch/config")
     config_path = repo / ".orch/config/orchestrator.toml"
     text = config_path.read_text(encoding="utf-8")
     if gemini is not None:
-        text = text.replace('gemini = "gemini"', f"gemini = {json.dumps(gemini)}")
+        text = re.sub(r'gemini = "[^"]*"', f"gemini = {json.dumps(gemini)}", text)
     if codex is not None:
         text = text.replace('codex = "codex"', f"codex = {json.dumps(codex)}")
+    if claude is not None:
+        text = text.replace("[runtime]", f"claude = {json.dumps(claude)}\n\n[runtime]")
     config_path.write_text(text, encoding="utf-8")
 
 
@@ -29,6 +39,34 @@ def fake_cli_command(action: str) -> str:
         "'prompt_has_context': 'Invocation Context' in prompt}))"
     )
     return f"{sys.executable} -c {json.dumps(script)}"
+
+
+def fake_cli_output(output: str) -> str:
+    script = f"import sys; sys.stdin.read(); print({output!r})"
+    return f"{sys.executable} -c {json.dumps(script)}"
+
+
+def load_task(task_id: str = "T-0001") -> dict:
+    task = json.loads(json.dumps({
+        "id": task_id,
+        "objective": "Do the thing.",
+        "owned_files": ["orch/cli.py"],
+        "forbidden_files": [],
+        "allowed_commands": ["python -m pytest tests/test_cli.py -v"],
+        "acceptance_criteria": [
+            {
+                "id": "AC-01",
+                "check": "python -m pytest tests/test_cli.py -v",
+                "kind": "command",
+            }
+        ],
+        "dependencies": [],
+        "branch": f"task/{task_id}",
+        "worktree_path": f".orch/worktrees/{task_id}",
+        "status": "pending",
+        "review_notes": [],
+    }))
+    return task
 
 
 def test_wrapper_injects_prompt_runs_cli_and_posts_handoff(tmp_path: Path) -> None:
@@ -76,6 +114,81 @@ def test_extract_handoff_accepts_plain_json_or_prefixed_line() -> None:
     assert extract_handoff('{"action": "ok"}\n') == {"action": "ok"}
     assert extract_handoff('noise\nORCH_HANDOFF: {"action": "ok"}\n') == {"action": "ok"}
     assert extract_handoff("noise only\n") is None
+
+
+def test_extract_handoff_accepts_prefixed_fenced_json() -> None:
+    output = """notes
+ORCH_HANDOFF:
+```json
+{
+  "action": "planned",
+  "plan_path": ".orch/plans/P-0001.md"
+}
+```
+"""
+
+    assert extract_handoff(output) == {
+        "action": "planned",
+        "plan_path": ".orch/plans/P-0001.md",
+    }
+
+
+def test_claude_planner_materializes_embedded_tasks(tmp_path: Path) -> None:
+    handoff = {
+        "plan_path": ".orch/plans/P-0001.md",
+        "plan_written": False,
+        "tasks": [load_task("T-0001")],
+        "risks": [],
+        "assumptions": ["Test assumption"],
+    }
+    output = "ORCH_HANDOFF:\n```json\n" + json.dumps(handoff, indent=2) + "\n```"
+    copy_config(tmp_path, claude=fake_cli_output(output))
+
+    result = ModelWrapper(tmp_path).run_role(
+        "claude-planner",
+        request_path=".orch/requests/R-0001.md",
+        log_name="P-0001",
+        timeout_seconds=5,
+    )
+
+    plan_path = tmp_path / ".orch/plans/P-0001.md"
+    assert result.succeeded
+    assert result.handoff == {
+        "action": "planned",
+        "assumptions": ["Test assumption"],
+        "plan_path": ".orch/plans/P-0001.md",
+        "plan_written": True,
+        "risks": [],
+        "role": "claude-planner",
+    }
+    assert extract_task_blocks(plan_path.read_text(encoding="utf-8")) == [load_task("T-0001")]
+
+
+def test_claude_planner_materializes_plan_content(tmp_path: Path) -> None:
+    plan_content = "# Plan\n\n```yaml\n" + json.dumps(load_task("T-0001")) + "\n```\n"
+    output = "ORCH_HANDOFF: " + json.dumps(
+        {
+            "plan_path": ".orch/plans/P-0001.md",
+            "plan_content": plan_content,
+        }
+    )
+    copy_config(tmp_path, claude=fake_cli_output(output))
+
+    result = ModelWrapper(tmp_path).run_role(
+        "claude-planner",
+        request_path=".orch/requests/R-0001.md",
+        log_name="P-0001",
+        timeout_seconds=5,
+    )
+
+    assert result.succeeded
+    assert result.handoff == {
+        "action": "planned",
+        "plan_path": ".orch/plans/P-0001.md",
+        "plan_written": True,
+        "role": "claude-planner",
+    }
+    assert (tmp_path / ".orch/plans/P-0001.md").read_text(encoding="utf-8") == plan_content
 
 
 def test_planner_console_entrypoint_reports_paths(tmp_path: Path, capsys) -> None:

@@ -558,6 +558,54 @@ def test_run_once_leaves_invalid_planner_handoff_unacked(tmp_path: Path) -> None
     assert inbox.read_next("orchestrator") is not None
 
 
+def test_run_once_materializes_planned_message_plan_content(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task("T-0001")
+    plan_content = "# Plan\n\n" f"```yaml\n{yaml.safe_dump(task, sort_keys=False)}```"
+    inbox = Inbox(repo)
+    inbox.post(
+        "orchestrator",
+        {
+            "action": "planned",
+            "plan_path": ".orch/plans/P-0001.md",
+            "plan_content": plan_content,
+        },
+    )
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "dispatched"
+    assert (repo / ".orch/plans/P-0001.md").read_text(encoding="utf-8") == plan_content
+    assert TaskStore(repo).read("T-0001")["status"] == "in_progress"
+
+
+def test_run_once_recovers_existing_plan_for_submit_request(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task("T-0001")
+    request_path = ".orch/requests/R.md"
+    plan_content = "# Plan\n\n" f"```yaml\n{yaml.safe_dump(task, sort_keys=False)}```"
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "submit_request", "request_path": request_path})
+    inbox.post(
+        "orchestrator",
+        {
+            "action": "planned",
+            "request_path": request_path,
+            "plan_path": ".orch/plans/P-0001.md",
+            "plan_content": plan_content,
+        },
+    )
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "plan_ingested"
+    assert (repo / ".orch/plans/P-0001.md").exists()
+    assert inbox.read_next("orchestrator") is None
+    assert TaskStore(repo).read("T-0001")["status"] == "pending"
+
+
 def test_run_once_dispatches_worker_completion_to_critic(tmp_path: Path) -> None:
     repo = init_repo(tmp_path)
     copy_runtime_layout(repo)
