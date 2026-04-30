@@ -19,12 +19,14 @@ ROLE_SPECS = {
         "cli": "gemini",
         "model": "planner",
         "log_role": "planner",
+        "headless_args": ["-p", ""],
     },
     "gemini-critic": {
         "prompt": "gemini-critic.md",
         "cli": "gemini",
         "model": "critic",
         "log_role": "critic",
+        "headless_args": ["-p", ""],
     },
     "codex-worker": {
         "prompt": "codex-worker.md",
@@ -115,14 +117,35 @@ class ModelWrapper:
             "root": str(self.root),
             "context": self._stringify_paths(context),
         }
+        inlined = self._inline_artifacts(context)
+        artifacts_section = ""
+        if inlined:
+            parts = []
+            for key, content in inlined.items():
+                parts.append(f"### {key}\n\n{content}")
+            artifacts_section = "\n\n## Artifact Contents\n\n" + "\n\n".join(parts)
         return (
             f"{role_prompt.rstrip()}\n\n"
             "## Invocation Context\n\n"
             "Use only the artifact paths in this JSON payload for handoff.\n\n"
-            f"```json\n{json.dumps(payload, indent=2, sort_keys=True)}\n```\n\n"
+            f"```json\n{json.dumps(payload, indent=2, sort_keys=True)}\n```"
+            f"{artifacts_section}\n\n"
             "Emit the final Orchestra handoff as a single JSON object on stdout, "
             "or on a line prefixed with ORCH_HANDOFF:.\n"
         )
+
+    def _inline_artifacts(self, context: dict[str, Any]) -> dict[str, str]:
+        """Read and inline content of any *_path context values that exist under root."""
+        inlined: dict[str, str] = {}
+        for key, value in context.items():
+            if not key.endswith("_path"):
+                continue
+            path = Path(str(value))
+            if not path.is_absolute():
+                path = self.root / path
+            if path.exists() and path.is_file():
+                inlined[key] = path.read_text(encoding="utf-8")
+        return inlined
 
     def _spec_for(self, role: str) -> dict[str, str]:
         try:
@@ -131,12 +154,13 @@ class ModelWrapper:
             allowed = ", ".join(sorted(ROLE_SPECS))
             raise ValueError(f"unknown wrapper role {role!r}; expected one of: {allowed}") from exc
 
-    def _argv_for(self, spec: dict[str, str]) -> tuple[str, ...]:
+    def _argv_for(self, spec: dict[str, Any]) -> tuple[str, ...]:
         command = getattr(self.config.cli, spec["cli"])
         argv = tuple(shlex.split(command))
         if not argv:
             raise ValueError(f"empty CLI command for {spec['cli']}")
-        return argv
+        headless = spec.get("headless_args", [])
+        return argv + tuple(headless)
 
     def _cwd_for(self, context: dict[str, Any]) -> Path:
         worktree = context.get("worktree_path")
