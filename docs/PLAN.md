@@ -5,7 +5,7 @@ single source of truth for the project's design and scope. Other models and
 contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
-**Status:** design complete; substrate tasks T-0001…T-0022 implemented and
+**Status:** design complete; substrate tasks T-0001…T-0023 implemented and
 tested (87 passing tests). T-0018 planner auto-invocation is now wired:
 `submit_request` invokes the planner wrapper, consumes its `planned`
 handoff, and ingests validated pending tasks without manual wrapper
@@ -19,11 +19,8 @@ now wired for plan task-count caps and continuous-run wall-clock caps. The
 full local pipeline — request submission, plan ingestion, worker
 dispatch, worker→critic handoff, and critic verdict routing through
 `MergeDriver`, rework, escalation, or abandonment — is in place and
-exercised by the unit suite.
-
-What is **not** yet wired: a first-drive runbook. That piece is the work
-required before a user can do a real end-to-end test drive — captured as
-T-0023 in §14.
+exercised by the unit suite. T-0023 first-drive documentation is available
+at `docs/RUNBOOK.md`.
 
 ---
 
@@ -247,8 +244,8 @@ authoritative; in-memory state is not.
 
 ## 11. What's Built vs What's Designed
 
-**Designed only (this doc):** the first-drive runbook. See §14 for the
-concrete task required to enable a first end-to-end test drive.
+**Designed only (this doc):** none for the local MVP substrate and first
+test drive.
 
 **Implemented runtime tasks:**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
@@ -465,15 +462,15 @@ concrete task required to enable a first end-to-end test drive.
 
 ## 14. First Test Drive — Required Implementation
 
-T-0001…T-0022 give us a working substrate, but one piece sits between
-"unit tests pass" and "Orchestra autonomously lands a small change on a
-throwaway repo." This section enumerates the discrete tasks required
-before a user can perform a first real end-to-end run.
+T-0001…T-0023 give us a working substrate plus the first-drive runbook.
+This section enumerates the discrete tasks required before a user can
+perform a first real end-to-end run.
 
-The shape of the remaining gap: `run_once` now spawns the planner,
-worker, critic, and integrator wrappers, and `orch run` continuously
-polls that substrate with budget caps. Preflight checks are now in place;
-kill switch and first-drive documentation remain for T-0023.
+The shape of the remaining gap is closed for the first test drive:
+`run_once` now spawns the planner, worker, critic, and integrator wrappers,
+`orch run` continuously polls that substrate with budget caps, preflight
+checks are in place, and `docs/RUNBOOK.md` documents the first-drive
+procedure and kill switch.
 
 **T-0018 planner-auto-invocation — implemented**
   - Objective: When the runtime processes a `submit_request` message,
@@ -556,7 +553,7 @@ kill switch and first-drive documentation remain for T-0023.
       failure.
     - Does not require live model authentication beyond `--version`.
 
-**T-0023 first-drive-runbook**
+**T-0023 first-drive-runbook — implemented**
   - Objective: Document the end-to-end first-run procedure so a user can
     reproduce a successful test drive on a throwaway repo.
   - Owned files: `docs/RUNBOOK.md`, `README.md`, `docs/PLAN.md`.
@@ -574,8 +571,8 @@ kill switch and first-drive documentation remain for T-0023.
       safe to delete between runs, and how `startup_reconcile` resumes
       partial work.
 
-After T-0021…T-0023 land, a user with valid Gemini and Codex credentials
-and a working Docker daemon should be able to clone Orchestra, run
-`orch doctor`, `orch image build`, `orch submit "..."`, and `orch run`,
-and watch a small change land on `main` of a target repo. That is the
+With T-0021…T-0023 landed, a user with valid Gemini and Codex credentials
+and a working Docker daemon should be able to follow `docs/RUNBOOK.md`, run
+`orch doctor`, `orch image build`, `orch submit "..."`, and `orch run`, and
+watch a small change land on `main` of a throwaway target repo. That is the
 bar for "first test drive."

@@ -12,7 +12,6 @@ import threading
 
 from orch.doctor import Doctor
 from orch.images import SandboxImageBuilder
-from orch.runtime import OrchestraRuntime, RunOnceResult, result_to_dict
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,11 +19,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "submit":
+            OrchestraRuntime, result_to_dict = _runtime_api()
             runtime = OrchestraRuntime.from_config(root=args.root)
             result = runtime.submit(args.prompt)
             print(result.request_path)
             return 0
         if args.command == "run":
+            OrchestraRuntime, result_to_dict = _runtime_api()
             runtime = OrchestraRuntime.from_config(root=args.root)
             if args.once:
                 result = runtime.run_once()
@@ -100,7 +101,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _print_run_result(result: RunOnceResult) -> None:
+def _runtime_api():
+    from orch.runtime import OrchestraRuntime, result_to_dict
+
+    return OrchestraRuntime, result_to_dict
+
+
+def _print_run_result(result: object) -> None:
+    _, result_to_dict = _runtime_api()
     print(json.dumps(result_to_dict(result), sort_keys=True), flush=True)
 
 

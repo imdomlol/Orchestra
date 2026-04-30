@@ -13,19 +13,17 @@ This README is the user guide. For architecture and the task roadmap, see
 
 ## Status at a glance
 
-- Substrate complete: T-0001 through T-0022 (87 passing tests).
+- Substrate complete: T-0001 through T-0023 (87 passing tests).
 - The full local pipeline — request → plan ingest → worker dispatch →
   critic handoff → merge — is wired and tested with mocked subprocesses.
 - `orch run` now continuously invokes the planner, worker, critic, and
   integrator wrappers as role inbox messages become actionable; use
   `Ctrl-C` or SIGTERM for clean shutdown.
-- **Not yet wired:** the first-drive runbook. That is tracked as T-0023 in
-  [PLAN.md §14](docs/PLAN.md). Until that lands,
-  Orchestra is best treated as a substrate to develop against, not a
-  hands-off autopilot.
+- The first-drive runbook is available at
+  [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
-If you want to do a real first end-to-end run, start with PLAN.md §14
-and read this README in full first.
+If you want to do a real first end-to-end run, start with
+[docs/RUNBOOK.md](docs/RUNBOOK.md) and read this README in full first.
 
 ---
 
@@ -48,6 +46,8 @@ and read this README in full first.
 
 ## Install
 
+Linux, macOS, or WSL:
+
 ```bash
 git clone <this repo>
 cd Orchestra
@@ -55,6 +55,18 @@ python -m venv .venv
 . .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+PowerShell can create a Windows virtualenv for editing docs or running
+commands that do not touch the runtime inbox:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+```
+
+The orchestrator runtime (`orch submit`, `orch run`) still needs WSL or
+another Unix-like shell because task pickup uses `fcntl` file locks.
 
 This installs the `orch` CLI plus the role wrapper entry points
 (`orch-gemini-planner`, `orch-gemini-critic`, `orch-codex-worker`,
@@ -335,8 +347,8 @@ tests/         pytest suite (one file per module)
 - The sandbox boundary is the Docker daemon. Anyone with Docker access
   on the host is effectively privileged; treat this as a practical
   isolation layer, not a multi-tenant security boundary.
-- Budgets are enforced, but the first-drive runbook is not written yet.
-  Until T-0023 lands, use a throwaway target repo for unattended runs.
+- Budgets are enforced, and the first-drive runbook uses a throwaway target
+  repo. Do not use an unattended first run on a valuable repository.
 - The orchestrator (Claude) never edits source. Workers may only edit
   files matching their task's `owned_files`, enforced by a per-worktree
   pre-commit hook.
@@ -349,7 +361,8 @@ tests/         pytest suite (one file per module)
 ## Further reading
 
 - [docs/PLAN.md](docs/PLAN.md) — full architecture, task roadmap, and
-  failure-handling policy. §14 lists the work needed for the first
-  unattended end-to-end run.
+  failure-handling policy.
+- [docs/RUNBOOK.md](docs/RUNBOOK.md) — first end-to-end test-drive
+  procedure on a throwaway repo.
 - `.orch/config/prompts/` — the role prompts used by each wrapper.
 - `examples/task.example.yaml` — a fully filled task YAML.
