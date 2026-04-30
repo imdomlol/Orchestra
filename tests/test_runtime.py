@@ -196,6 +196,224 @@ def test_run_once_dispatches_worker_completion_to_critic(tmp_path: Path) -> None
     assert inbox.read_next("orchestrator") is None
 
 
+def _make_critic_review_task(repo: Path, *, extra_notes: list[dict] | None = None) -> dict:
+    task = load_task()
+    task["owned_files"] = ["feature.txt"]
+    task["review_notes"] = extra_notes or []
+    store = TaskStore(repo)
+    store.write_pending(task)
+    store.transition("T-0001", "active", "critic_review")
+    return task
+
+
+def _make_feature_worktree(repo: Path) -> None:
+    worktree = repo / ".orch/worktrees/T-0001"
+    git(repo, "worktree", "add", "-b", "task/T-0001", str(worktree), "main")
+    (worktree / "feature.txt").write_text("hello\n", encoding="utf-8")
+    git(worktree, "add", "feature.txt")
+    git(worktree, "commit", "-m", "add feature")
+
+
+def test_critic_approval_triggers_integration_and_merges(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    _make_critic_review_task(repo)
+    _make_feature_worktree(repo)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {
+        "action": "critic_reviewed",
+        "task_id": "T-0001",
+        "verdict": "approve",
+        "body": "All ACs satisfied.",
+    })
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "merged"
+    assert result.merge_result is not None
+    assert result.merge_result.merged
+    store = TaskStore(repo)
+    assert store.read("T-0001")["status"] == "merged"
+    assert (repo / "feature.txt").read_text(encoding="utf-8") == "hello\n"
+    assert inbox.read_next("orchestrator") is None
+
+
+def test_critic_approval_appends_approve_note_before_merge(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    _make_critic_review_task(repo)
+    _make_feature_worktree(repo)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {
+        "action": "critic_reviewed",
+        "task_id": "T-0001",
+        "verdict": "approve",
+        "body": "Looks good.",
+    })
+
+    runtime(repo).run_once()
+
+    store = TaskStore(repo)
+    notes = store.read("T-0001")["review_notes"]
+    assert any(n["author"] == "gemini-critic" and n["verdict"] == "approve" for n in notes)
+
+
+def test_critic_request_changes_routes_back_to_worker(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    _make_critic_review_task(repo)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {
+        "action": "critic_reviewed",
+        "task_id": "T-0001",
+        "verdict": "request_changes",
+        "body": "Missing test coverage.",
+    })
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "critic_rework_dispatched"
+    store = TaskStore(repo)
+    assert store.read("T-0001")["status"] == "in_progress"
+    worker_msg = inbox.read_next("worker")
+    assert worker_msg is not None
+    assert worker_msg.body["task_id"] == "T-0001"
+    notes = store.read("T-0001")["review_notes"]
+    critic_notes = [n for n in notes if n["author"] == "gemini-critic"]
+    assert len(critic_notes) == 1
+    assert critic_notes[0]["verdict"] == "request_changes"
+    assert inbox.read_next("orchestrator") is None
+
+
+def test_critic_request_changes_escalates_after_max_retries(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    prior_notes = [
+        {
+            "author": "gemini-critic",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "verdict": "request_changes",
+            "body": "Round 1.",
+        },
+        {
+            "author": "gemini-critic",
+            "timestamp": "2024-01-02T00:00:00Z",
+            "verdict": "request_changes",
+            "body": "Round 2.",
+        },
+    ]
+    _make_critic_review_task(repo, extra_notes=prior_notes)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {
+        "action": "critic_reviewed",
+        "task_id": "T-0001",
+        "verdict": "request_changes",
+        "body": "Still not right.",
+    })
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "escalated"
+    store = TaskStore(repo)
+    assert store.read("T-0001")["status"] == "blocked"
+    assert inbox.read_next("worker") is None
+    assert inbox.read_next("orchestrator") is None
+
+
+def test_critic_reject_abandons_task(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    _make_critic_review_task(repo)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {
+        "action": "critic_reviewed",
+        "task_id": "T-0001",
+        "verdict": "reject",
+        "body": "Task scope is too large.",
+    })
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "abandoned"
+    store = TaskStore(repo)
+    assert store.read("T-0001")["status"] == "abandoned"
+    assert inbox.read_next("orchestrator") is None
+
+
+def test_critic_reviewed_missing_task_id_stays_unacked(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "critic_reviewed", "verdict": "approve"})
+
+    try:
+        runtime(repo).run_once()
+    except ValueError as exc:
+        assert "task_id" in str(exc)
+    else:
+        raise AssertionError("run_once should raise for missing task_id")
+
+    assert inbox.read_next("orchestrator") is not None
+
+
+def test_critic_reviewed_invalid_verdict_stays_unacked(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    _make_critic_review_task(repo)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {
+        "action": "critic_reviewed",
+        "task_id": "T-0001",
+        "verdict": "maybe",
+    })
+
+    try:
+        runtime(repo).run_once()
+    except ValueError as exc:
+        assert "verdict" in str(exc)
+    else:
+        raise AssertionError("run_once should raise for invalid verdict")
+
+    assert inbox.read_next("orchestrator") is not None
+
+
+def test_critic_approval_with_merge_conflict_routes_back_to_worker(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task()
+    task["owned_files"] = ["README.md"]
+    store = TaskStore(repo)
+    store.write_pending(task)
+    store.transition("T-0001", "active", "critic_review")
+    worktree = repo / ".orch/worktrees/T-0001"
+    git(repo, "worktree", "add", "-b", "task/T-0001", str(worktree), "main")
+    (worktree / "README.md").write_text("# Worker\n", encoding="utf-8")
+    git(worktree, "add", "README.md")
+    git(worktree, "commit", "-m", "worker readme")
+    # Diverge main so the patch won't apply cleanly.
+    (repo / "README.md").write_text("# Main\n", encoding="utf-8")
+    git(repo, "add", "README.md")
+    git(repo, "commit", "-m", "main readme")
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {
+        "action": "critic_reviewed",
+        "task_id": "T-0001",
+        "verdict": "approve",
+        "body": "Approved.",
+    })
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "merge_failed_reworking"
+    assert result.merge_result is not None
+    assert result.merge_result.status == "conflict"
+    assert store.read("T-0001")["status"] == "in_progress"
+    worker_msg = inbox.read_next("worker")
+    assert worker_msg is not None
+    assert worker_msg.body["task_id"] == "T-0001"
+    assert inbox.read_next("orchestrator") is None
+
+
 def test_startup_reconcile_clears_stale_pid_and_counts_state(tmp_path: Path) -> None:
     repo = init_repo(tmp_path)
     copy_runtime_layout(repo)

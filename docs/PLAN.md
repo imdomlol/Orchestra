@@ -13,7 +13,10 @@ implemented and tested. Project-specific Docker image assets are now
 configured and tested without requiring Docker during the unit suite.
 Planner handoff ingestion now turns embedded plan task YAML into validated
 pending tasks for dispatch. Worker completion handoffs now export review
-diffs and dispatch critic review messages.
+diffs and dispatch critic review messages. Critic review handoffs now
+route approve verdicts through MergeDriver integration, route
+request_changes back to the worker (up to max_retries rounds), escalate
+to blocked on retry exhaustion, and abandon on reject.
 
 ---
 
@@ -376,6 +379,27 @@ complete failure escalation policy.
       - After successful ingest, runtime dispatches through the existing
         dispatcher when worker capacity is available.
 
+17. **T-0017 critic-review-ingest**
+    - Objective: Route critic verdicts into the next lifecycle step: merge,
+      worker rework, escalation, or abandonment.
+    - Owned files: `orch/runtime.py`, `tests/test_runtime.py`, `docs/PLAN.md`.
+    - Acceptance:
+      - Runtime handles orchestrator inbox messages with
+        `action: "critic_reviewed"`, `task_id`, and `verdict`.
+      - On `approve`: transitions to `integration_review`, calls
+        `MergeDriver.merge_task()`, and returns `kind="merged"` on success.
+      - On `approve` with integration failure: routes back to worker
+        (`kind="merge_failed_reworking"`) or escalates to `blocked` after
+        `max_retries` integration failures (`kind="escalated"`).
+      - On `request_changes` within retry budget: appends review note,
+        transitions task to `in_progress`, posts worker re-dispatch message
+        (`kind="critic_rework_dispatched"`).
+      - On `request_changes` at or beyond `max_retries` prior rounds:
+        transitions task to `blocked` (`kind="escalated"`).
+      - On `reject`: transitions task to `abandoned` (`kind="abandoned"`).
+      - Malformed messages (missing task_id or invalid verdict) raise before
+        ack, leaving the message for retry.
+
 16. **T-0016 worker-critic-handoff**
     - Objective: Route completed worker branches into critic review using
       durable diff artifacts and inbox handoff messages.
@@ -392,7 +416,7 @@ complete failure escalation policy.
       - Malformed worker completion messages remain unacknowledged by failing
         before ack.
 
-**Required external pieces (out of scope of T-0001…T-0016):**
+**Required external pieces (out of scope of T-0001…T-0017):**
 - None for the local MVP substrate; real model CLI credentials and provider
   availability are environment-specific runtime concerns.
 
@@ -424,6 +448,8 @@ complete failure escalation policy.
   this doc in the same PR.
 - §8 (parallelism) and §10 (failure policy) are tunable; change freely
   once T-0010 is running and there is real data.
-- Next iterations should focus on critic and integrator handoff handling now
-  that worker output can become critic review input.
+- Next iterations should focus on a continuous `orch run` loop (multiple
+  `run_once` calls), budget enforcement (max_tasks_per_request,
+  max_wall_clock_minutes), and wiring the `codex-integrator` model wrapper
+  as an optional pre-merge review step before `MergeDriver`.
 - When in doubt: prefer fewer features, stricter contracts, more logs.

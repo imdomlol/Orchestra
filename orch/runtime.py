@@ -13,9 +13,10 @@ from uuid import uuid4
 from orch.config import OrchestraConfig, RuntimeConfig, load_config
 from orch.dispatcher import DispatchResult, Dispatcher
 from orch.inbox import Inbox, InboxMessage
+from orch.merge import MergeDriver, MergeResult
 from orch.plans import PlanIngestResult, PlanIngestor
 from orch.review import CriticDispatchResult, ReviewDispatcher
-from orch.task_store import TaskStore
+from orch.task_store import ReviewNote, TaskStore
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class RunOnceResult:
     critic_dispatch: CriticDispatchResult | None = None
     inbox_message: InboxMessage | None = None
     plan_ingest: PlanIngestResult | None = None
+    merge_result: MergeResult | None = None
 
 
 class OrchestraRuntime:
@@ -55,6 +57,7 @@ class OrchestraRuntime:
         dispatcher: Dispatcher | None = None,
         plan_ingestor: PlanIngestor | None = None,
         review_dispatcher: ReviewDispatcher | None = None,
+        merge_driver: MergeDriver | None = None,
     ) -> None:
         self.root = root.resolve()
         self.runtime_config = runtime_config
@@ -75,6 +78,10 @@ class OrchestraRuntime:
             task_store=self.task_store,
             inbox=self.inbox,
         )
+        self.merge_driver = merge_driver or MergeDriver(
+            root=self.root,
+            task_store=self.task_store,
+        )
 
     @classmethod
     def from_config(
@@ -85,7 +92,8 @@ class OrchestraRuntime:
     ) -> "OrchestraRuntime":
         resolved_root = root.resolve()
         loaded = config or load_config(resolved_root / ".orch" / "config")
-        return cls(root=resolved_root, runtime_config=loaded.runtime)
+        merge_driver = MergeDriver.from_config(root=resolved_root, config=loaded)
+        return cls(root=resolved_root, runtime_config=loaded.runtime, merge_driver=merge_driver)
 
     def submit(self, prompt: str) -> SubmitResult:
         if not prompt.strip():
@@ -189,12 +197,124 @@ class OrchestraRuntime:
                 critic_dispatch=critic,
                 inbox_message=message,
             )
+        if action == "critic_reviewed":
+            return self._handle_critic_reviewed(message)
 
         self.inbox.ack(message)
         return RunOnceResult(
             kind="ignored_message",
             message=f"ignored unsupported action: {action!r}",
             inbox_message=message,
+        )
+
+    def _handle_critic_reviewed(self, message: InboxMessage) -> RunOnceResult:
+        body = message.body
+        task_id = body.get("task_id")
+        verdict = body.get("verdict")
+        note_body = str(body.get("body") or verdict)
+
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise ValueError("critic_reviewed message must include task_id")
+        if verdict not in {"approve", "request_changes", "reject"}:
+            raise ValueError(
+                f"critic_reviewed message must have a valid verdict, got {verdict!r}"
+            )
+
+        # Count prior critic request_changes rounds before appending the new note.
+        task = self.task_store.read(task_id)
+        prior_critic_rounds = sum(
+            1
+            for note in task.get("review_notes", [])
+            if note.get("author") == "gemini-critic"
+            and note.get("verdict") == "request_changes"
+        )
+
+        self.task_store.append_review_note(
+            task_id, ReviewNote(author="gemini-critic", verdict=verdict, body=note_body)
+        )
+
+        if verdict == "approve":
+            self.task_store.transition(task_id, "active", "integration_review")
+            merge = self.merge_driver.merge_task(task_id)
+            if merge.merged:
+                self.inbox.ack(message)
+                return RunOnceResult(
+                    kind="merged",
+                    message=f"merged {task_id}",
+                    merge_result=merge,
+                    inbox_message=message,
+                )
+            # Integration failed: count failures to decide whether to escalate.
+            task_after = self.task_store.read(task_id)
+            prior_integration_failures = sum(
+                1
+                for note in task_after.get("review_notes", [])
+                if note.get("author") == "codex-integrator"
+                and note.get("verdict") == "request_changes"
+            )
+            if prior_integration_failures >= self.runtime_config.max_retries:
+                self.task_store.transition(task_id, "active", "blocked")
+                self.inbox.ack(message)
+                return RunOnceResult(
+                    kind="escalated",
+                    message=(
+                        f"{task_id} blocked after {prior_integration_failures} "
+                        "integration failures"
+                    ),
+                    merge_result=merge,
+                    inbox_message=message,
+                )
+            self._redispatch_to_worker(task_id)
+            self.inbox.ack(message)
+            return RunOnceResult(
+                kind="merge_failed_reworking",
+                message=f"integration failed for {task_id}; routed back to worker",
+                merge_result=merge,
+                inbox_message=message,
+            )
+
+        if verdict == "request_changes":
+            if prior_critic_rounds >= self.runtime_config.max_retries:
+                self.task_store.transition(task_id, "active", "blocked")
+                self.inbox.ack(message)
+                return RunOnceResult(
+                    kind="escalated",
+                    message=(
+                        f"{task_id} blocked after {prior_critic_rounds + 1} critic rounds"
+                    ),
+                    inbox_message=message,
+                )
+            self._redispatch_to_worker(task_id)
+            self.inbox.ack(message)
+            return RunOnceResult(
+                kind="critic_rework_dispatched",
+                message=(
+                    f"critic requested changes for {task_id}; "
+                    f"routed to worker (round {prior_critic_rounds + 1})"
+                ),
+                inbox_message=message,
+            )
+
+        # verdict == "reject"
+        self.task_store.transition(task_id, "done", "abandoned")
+        self.inbox.ack(message)
+        return RunOnceResult(
+            kind="abandoned",
+            message=f"{task_id} abandoned after critic rejection",
+            inbox_message=message,
+        )
+
+    def _redispatch_to_worker(self, task_id: str) -> Path:
+        task = self.task_store.read(task_id)
+        task_path = self.task_store.transition(task_id, "active", "in_progress")
+        return self.inbox.post(
+            "worker",
+            {
+                "task_id": task_id,
+                "task_yaml_path": str(task_path.relative_to(self.root)),
+                "worktree_path": task["worktree_path"],
+                "role": "worker",
+            },
         )
 
     def _write_request(self, prompt: str) -> Path:
@@ -287,4 +407,7 @@ def result_to_dict(result: RunOnceResult) -> dict[str, Any]:
         data["plan_path"] = str(result.plan_ingest.plan_path)
         data["task_paths"] = [str(path) for path in result.plan_ingest.task_paths]
         data["task_count"] = result.plan_ingest.task_count
+    if result.merge_result is not None:
+        data["merge_status"] = result.merge_result.status
+        data["patch_path"] = str(result.merge_result.patch_path)
     return data
