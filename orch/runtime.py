@@ -325,6 +325,7 @@ class OrchestraRuntime:
         planner_wrapper = self.model_wrapper or ModelWrapper(
             root=self.root,
             inbox=self.inbox,
+            stderr_sink=self._on_progress,
         )
         self._progress("Calling Gemini planner...")
         planner = planner_wrapper.run_role(
@@ -451,7 +452,7 @@ class OrchestraRuntime:
         if wrapper_role is None:
             raise ValueError(f"unsupported agent inbox role: {message.role}")
 
-        wrapper = self.model_wrapper or ModelWrapper(root=self.root, inbox=self.inbox)
+        wrapper = self.model_wrapper or ModelWrapper(root=self.root, inbox=self.inbox, stderr_sink=self._on_progress)
         context = dict(message.body)
         context.pop("role", None)
         task_id = context.get("task_id")

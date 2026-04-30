@@ -9,8 +9,9 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import threading
 import time
-from typing import Sequence
+from typing import Callable, Sequence
 from uuid import uuid4
 
 from orch.config import SandboxConfig
@@ -55,6 +56,7 @@ class SubprocessRunner:
         cwd: Path | None = None,
         stdin: str | None = None,
         timeout_seconds: int,
+        stderr_sink: Callable[[str], None] | None = None,
     ) -> ProcessResult:
         if not argv:
             raise ValueError("argv must not be empty")
@@ -68,26 +70,32 @@ class SubprocessRunner:
         started = time.monotonic()
         timed_out = False
         returncode: int | None
-        try:
-            completed = subprocess.run(
-                list(argv),
-                cwd=working_dir,
-                input=stdin,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=timeout_seconds,
+        if stderr_sink is not None:
+            stdout, stderr, returncode, timed_out = self._run_streaming(
+                argv, cwd=working_dir, stdin=stdin,
+                timeout_seconds=timeout_seconds, stderr_sink=stderr_sink,
             )
-            stdout = completed.stdout
-            stderr = completed.stderr
-            returncode = completed.returncode
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            returncode = None
-            stdout = _coerce_output(exc.stdout)
-            stderr = _coerce_output(exc.stderr)
-            timeout_note = f"\n[orchestra] timed out after {timeout_seconds} seconds\n"
-            stderr = f"{stderr}{timeout_note}" if stderr else timeout_note.lstrip()
+        else:
+            try:
+                completed = subprocess.run(
+                    list(argv),
+                    cwd=working_dir,
+                    input=stdin,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=timeout_seconds,
+                )
+                stdout = completed.stdout
+                stderr = completed.stderr
+                returncode = completed.returncode
+            except subprocess.TimeoutExpired as exc:
+                timed_out = True
+                returncode = None
+                stdout = _coerce_output(exc.stdout)
+                stderr = _coerce_output(exc.stderr)
+                timeout_note = f"\n[orchestra] timed out after {timeout_seconds} seconds\n"
+                stderr = f"{stderr}{timeout_note}" if stderr else timeout_note.lstrip()
 
         duration = time.monotonic() - started
         self._write_log(stdout_path, stdout)
@@ -101,6 +109,51 @@ class SubprocessRunner:
             timed_out=timed_out,
             duration_seconds=duration,
         )
+
+    def _run_streaming(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        stdin: str | None,
+        timeout_seconds: int,
+        stderr_sink: Callable[[str], None],
+    ) -> tuple[str, str, int | None, bool]:
+        proc = subprocess.Popen(
+            list(argv),
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stderr_lines: list[str] = []
+
+        def drain_stderr() -> None:
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                stderr_lines.append(line)
+                stderr_sink(line.rstrip())
+
+        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        timed_out = False
+        try:
+            stdout, _ = proc.communicate(input=stdin, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            remaining_out, _ = proc.communicate()
+            stdout = remaining_out or ""
+            timed_out = True
+
+        stderr_thread.join()
+        stderr = "".join(stderr_lines)
+        if timed_out:
+            timeout_note = f"\n[orchestra] timed out after {timeout_seconds} seconds\n"
+            stderr = f"{stderr}{timeout_note}" if stderr else timeout_note.lstrip()
+        returncode = proc.returncode if not timed_out else None
+        return stdout, stderr, returncode, timed_out
 
     def run_allowed(
         self,

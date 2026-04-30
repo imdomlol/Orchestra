@@ -72,11 +72,13 @@ class ModelWrapper:
         config: OrchestraConfig | None = None,
         runner: SubprocessRunner | None = None,
         inbox: Inbox | None = None,
+        stderr_sink: Callable[[str], None] | None = None,
     ) -> None:
         self.root = root.resolve()
         self.config = config or load_config(self.root / ".orch" / "config")
         self.runner = runner or SubprocessRunner(self.root)
         self.inbox = inbox or Inbox(self.root)
+        self.stderr_sink = stderr_sink
 
     def run_role(
         self,
@@ -97,6 +99,7 @@ class ModelWrapper:
             cwd=cwd,
             stdin=prompt,
             timeout_seconds=timeout_seconds or self.config.runtime.default_timeout_seconds,
+            stderr_sink=self.stderr_sink,
         )
 
         handoff = None
