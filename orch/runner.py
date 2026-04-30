@@ -128,6 +128,20 @@ class SubprocessRunner:
             text=True,
         )
         stderr_lines: list[str] = []
+        stdout_lines: list[str] = []
+
+        def write_stdin() -> None:
+            assert proc.stdin is not None
+            try:
+                if stdin:
+                    proc.stdin.write(stdin)
+            finally:
+                proc.stdin.close()
+
+        def drain_stdout() -> None:
+            assert proc.stdout is not None
+            for chunk in proc.stdout:
+                stdout_lines.append(chunk)
 
         def drain_stderr() -> None:
             assert proc.stderr is not None
@@ -135,19 +149,26 @@ class SubprocessRunner:
                 stderr_lines.append(line)
                 stderr_sink(line.rstrip())
 
-        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
-        stderr_thread.start()
+        threads = [
+            threading.Thread(target=write_stdin, daemon=True),
+            threading.Thread(target=drain_stdout, daemon=True),
+            threading.Thread(target=drain_stderr, daemon=True),
+        ]
+        for t in threads:
+            t.start()
 
         timed_out = False
         try:
-            stdout, _ = proc.communicate(input=stdin, timeout=timeout_seconds)
+            proc.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             proc.kill()
-            remaining_out, _ = proc.communicate()
-            stdout = remaining_out or ""
+            proc.wait()
             timed_out = True
 
-        stderr_thread.join()
+        for t in threads:
+            t.join()
+
+        stdout = "".join(stdout_lines)
         stderr = "".join(stderr_lines)
         if timed_out:
             timeout_note = f"\n[orchestra] timed out after {timeout_seconds} seconds\n"
