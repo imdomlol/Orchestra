@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import shutil
 import subprocess
@@ -75,15 +76,17 @@ def process_result(
     returncode: int = 0,
     stdout: str = "",
     stderr: str = "",
+    log_role: str = "planner",
+    argv: tuple[str, ...] = ("fake-planner",),
 ) -> ProcessResult:
-    log_dir = repo / ".orch/logs/planner"
+    log_dir = repo / ".orch/logs" / log_role
     log_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = log_dir / "planner.stdout"
-    stderr_path = log_dir / "planner.stderr"
+    stdout_path = log_dir / f"{log_role}.stdout"
+    stderr_path = log_dir / f"{log_role}.stderr"
     stdout_path.write_text(stdout, encoding="utf-8")
     stderr_path.write_text(stderr, encoding="utf-8")
     return ProcessResult(
-        argv=("fake-planner",),
+        argv=argv,
         cwd=repo,
         returncode=returncode,
         stdout_path=stdout_path,
@@ -103,6 +106,25 @@ class FakePlannerWrapper:
         return self.result
 
 
+class SequentialWrapper:
+    def __init__(self, repo: Path, results: list[WrapperResult]) -> None:
+        self.repo = repo
+        self.results = results
+        self.calls: list[dict] = []
+
+    def run_role(self, role: str, **context) -> WrapperResult:
+        self.calls.append({"role": role, **context})
+        if not self.results:
+            raise AssertionError("unexpected wrapper call")
+        result = self.results.pop(0)
+        if result.handoff is not None and result.handoff_path is None:
+            result = replace(
+                result,
+                handoff_path=Inbox(self.repo).post("orchestrator", result.handoff),
+            )
+        return result
+
+
 def planner_result(
     repo: Path,
     *,
@@ -117,6 +139,28 @@ def planner_result(
         role="gemini-planner",
         process=process_result(repo, returncode=returncode, stderr=stderr),
         handoff_path=handoff_path,
+        handoff=handoff,
+    )
+
+
+def agent_result(
+    repo: Path,
+    *,
+    role: str,
+    handoff: dict | None,
+    returncode: int = 0,
+    stderr: str = "",
+) -> WrapperResult:
+    return WrapperResult(
+        role=role,
+        process=process_result(
+            repo,
+            returncode=returncode,
+            stderr=stderr,
+            log_role=role,
+            argv=(f"fake-{role}",),
+        ),
+        handoff_path=None,
         handoff=handoff,
     )
 
@@ -269,6 +313,128 @@ def test_run_once_dispatches_ready_task_when_no_inbox_message(tmp_path: Path) ->
 
     assert result.kind == "dispatched"
     assert store.read("T-0001")["status"] == "in_progress"
+
+
+def test_run_once_drives_worker_inbox_with_wrapper(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    inbox = Inbox(repo)
+    worker_message = inbox.post(
+        "worker",
+        {
+            "task_id": "T-0001",
+            "task_yaml_path": ".orch/tasks/active/T-0001.yaml",
+            "worktree_path": ".orch/worktrees/T-0001",
+            "role": "worker",
+        },
+    )
+    wrapper = SequentialWrapper(
+        repo,
+        [
+            agent_result(
+                repo,
+                role="codex-worker",
+                handoff={"action": "worker_completed", "task_id": "T-0001"},
+            )
+        ]
+    )
+
+    result = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        model_wrapper=wrapper,
+    ).run_once()
+
+    assert result.kind == "agent_ran"
+    assert not worker_message.exists()
+    assert inbox.read_next("orchestrator") is not None
+    assert wrapper.calls == [
+        {
+            "role": "codex-worker",
+            "log_name": "T-0001",
+            "inbox_role": "orchestrator",
+            "task_id": "T-0001",
+            "task_yaml_path": ".orch/tasks/active/T-0001.yaml",
+            "worktree_path": ".orch/worktrees/T-0001",
+        }
+    ]
+
+
+def test_run_once_failed_agent_wrapper_leaves_role_message_for_retry(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    inbox = Inbox(repo)
+    inbox.post(
+        "critic",
+        {
+            "task_id": "T-0001",
+            "task_yaml_path": ".orch/tasks/active/T-0001.yaml",
+            "diff_path": ".orch/patches/T-0001.diff",
+            "role": "critic",
+        },
+    )
+    wrapper = SequentialWrapper(
+        repo,
+        [agent_result(repo, role="gemini-critic", handoff=None, returncode=2)]
+    )
+
+    result = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        model_wrapper=wrapper,
+    ).run_once()
+
+    assert result.kind == "agent_failed"
+    assert inbox.read_next("critic") is not None
+    assert inbox.read_next("orchestrator") is None
+
+
+def test_run_once_drives_agent_inbox_before_dispatch(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    store = TaskStore(repo)
+    store.write_pending(load_task())
+    inbox = Inbox(repo)
+    inbox.post(
+        "worker",
+        {
+            "task_id": "T-9999",
+            "task_yaml_path": ".orch/tasks/active/T-9999.yaml",
+            "worktree_path": ".orch/worktrees/T-9999",
+            "role": "worker",
+        },
+    )
+    wrapper = SequentialWrapper(
+        repo,
+        [
+            agent_result(
+                repo,
+                role="codex-worker",
+                handoff={"action": "worker_completed", "task_id": "T-9999"},
+            )
+        ]
+    )
+
+    result = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        model_wrapper=wrapper,
+    ).run_once()
+
+    assert result.kind == "agent_ran"
+    assert store.read("T-0001")["status"] == "pending"
 
 
 def test_run_once_ingests_planner_handoff_then_dispatches(tmp_path: Path) -> None:
@@ -552,6 +718,58 @@ def test_critic_approval_with_merge_conflict_routes_back_to_worker(tmp_path: Pat
     assert worker_msg is not None
     assert worker_msg.body["task_id"] == "T-0001"
     assert inbox.read_next("orchestrator") is None
+
+
+def test_mocked_worker_critic_merge_path_needs_no_manual_wrapper(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task()
+    task["owned_files"] = ["feature.txt"]
+    TaskStore(repo).write_pending(task)
+    wrapper = SequentialWrapper(
+        repo,
+        [
+            agent_result(
+                repo,
+                role="codex-worker",
+                handoff={"action": "worker_completed", "task_id": "T-0001"},
+            ),
+            agent_result(
+                repo,
+                role="gemini-critic",
+                handoff={
+                    "action": "critic_reviewed",
+                    "task_id": "T-0001",
+                    "verdict": "approve",
+                    "body": "Looks good.",
+                },
+            ),
+        ]
+    )
+    orch = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        model_wrapper=wrapper,
+    )
+
+    assert orch.run_once().kind == "dispatched"
+    worktree = repo / ".orch/worktrees/T-0001"
+    (worktree / "feature.txt").write_text("hello\n", encoding="utf-8")
+    git(worktree, "add", "feature.txt")
+    git(worktree, "commit", "-m", "add feature")
+
+    assert orch.run_once().kind == "agent_ran"
+    assert orch.run_once().kind == "critic_dispatched"
+    assert orch.run_once().kind == "agent_ran"
+    result = orch.run_once()
+
+    assert result.kind == "merged"
+    assert TaskStore(repo).read("T-0001")["status"] == "merged"
+    assert (repo / "feature.txt").read_text(encoding="utf-8") == "hello\n"
 
 
 def test_startup_reconcile_clears_stale_pid_and_counts_state(tmp_path: Path) -> None:

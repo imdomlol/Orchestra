@@ -5,22 +5,22 @@ single source of truth for the project's design and scope. Other models and
 contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
-**Status:** design complete; substrate tasks T-0001…T-0017 implemented and
-tested (69 passing tests). T-0018 planner auto-invocation is now wired:
+**Status:** design complete; substrate tasks T-0001…T-0019 implemented and
+tested (75 passing tests). T-0018 planner auto-invocation is now wired:
 `submit_request` invokes the planner wrapper, consumes its `planned`
 handoff, and ingests validated pending tasks without manual wrapper
-execution. The full local pipeline — request submission, plan ingestion,
-worker dispatch, worker→critic handoff, and critic verdict routing
-through `MergeDriver`, rework, escalation, or abandonment — is in place
-and exercised by the unit suite.
+execution. T-0019 agent-driver invocation is also wired: `run_once`
+consumes worker, critic, and integrator inbox messages by invoking the
+matching wrapper and only acknowledges those role messages after a
+successful handoff. The full local pipeline — request submission, plan
+ingestion, worker dispatch, worker→critic handoff, and critic verdict
+routing through `MergeDriver`, rework, escalation, or abandonment — is in
+place and exercised by the unit suite.
 
-What is **not** yet wired: the runtime still does not invoke the worker,
-critic, or integrator CLI itself. The wrapper scripts
-(`orch-codex-worker`, `orch-gemini-critic`, etc.) must be run by hand for
-those steps. Closing that loop, plus a continuous `orch run`, budget
-enforcement, an `orch doctor` preflight, and a first-drive runbook, is
-the work required before a user can do a real end-to-end test drive —
-captured as T-0019…T-0023 in §14.
+What is **not** yet wired: a continuous `orch run` loop, budget
+enforcement, an `orch doctor` preflight, and a first-drive runbook. Those
+pieces are the work required before a user can do a real end-to-end test
+drive — captured as T-0020…T-0023 in §14.
 
 ---
 
@@ -244,11 +244,10 @@ authoritative; in-memory state is not.
 
 ## 11. What's Built vs What's Designed
 
-**Designed only (this doc):** runtime-driven invocation of the worker,
-critic, and integrator CLIs (currently those wrappers must be run
-manually); a continuous `orch run` event loop; budget enforcement; an
-`orch doctor` preflight; and the first-drive runbook. See §14 for the
-concrete tasks required to enable a first end-to-end test drive.
+**Designed only (this doc):** a continuous `orch run` event loop; budget
+enforcement; an `orch doctor` preflight; and the first-drive runbook. See
+§14 for the concrete tasks required to enable a first end-to-end test
+drive.
 
 **Implemented runtime tasks:**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
@@ -465,16 +464,15 @@ concrete tasks required to enable a first end-to-end test drive.
 
 ## 14. First Test Drive — Required Implementation
 
-T-0001…T-0017 give us a working substrate, but several pieces sit between
+T-0001…T-0019 give us a working substrate, but several pieces sit between
 "unit tests pass" and "Orchestra autonomously lands a small change on a
 throwaway repo." This section enumerates the discrete tasks required
 before a user can perform a first real end-to-end run.
 
-The shape of the remaining gap: `run_once` now spawns the planner for
-submitted requests, but the worker, critic, and integrator subprocesses
-still require manual wrapper invocation. Several safety rails (budgets,
-preflight checks, kill switch documentation) are not yet in place.
-T-0019…T-0023 close that gap.
+The shape of the remaining gap: `run_once` now spawns the planner,
+worker, critic, and integrator wrappers, but several safety rails
+(continuous polling, budgets, preflight checks, kill switch
+documentation) are not yet in place. T-0020…T-0023 close that gap.
 
 **T-0018 planner-auto-invocation — implemented**
   - Objective: When the runtime processes a `submit_request` message,
@@ -494,7 +492,7 @@ T-0019…T-0023 close that gap.
     - Tests cover the success path, missing-handoff path, and non-zero
       exit path with a mocked wrapper subprocess.
 
-**T-0019 agent-driver loop**
+**T-0019 agent-driver loop — implemented**
   - Objective: Add a runtime-side driver that consumes the `worker`,
     `critic`, and `integrator` inboxes by invoking each role's wrapper
     through `ModelWrapper`, capturing the JSON handoff, and acking the
@@ -575,7 +573,7 @@ T-0019…T-0023 close that gap.
       safe to delete between runs, and how `startup_reconcile` resumes
       partial work.
 
-After T-0018…T-0023 land, a user with valid Gemini and Codex credentials
+After T-0020…T-0023 land, a user with valid Gemini and Codex credentials
 and a working Docker daemon should be able to clone Orchestra, run
 `orch doctor`, `orch image build`, `orch submit "..."`, and `orch run`,
 and watch a small change land on `main` of a target repo. That is the

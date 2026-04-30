@@ -13,13 +13,14 @@ This README is the user guide. For architecture and the task roadmap, see
 
 ## Status at a glance
 
-- Substrate complete: T-0001 through T-0017 (69 passing tests).
+- Substrate complete: T-0001 through T-0019 (75 passing tests).
 - The full local pipeline — request → plan ingest → worker dispatch →
   critic handoff → merge — is wired and tested with mocked subprocesses.
-- **Not yet wired:** the runtime invokes the planner, but does not invoke
-  the worker or critic CLI on its own. You must run those wrapper scripts
-  by hand between `orch run --once` ticks. Closing that loop is tracked as
-  T-0019…T-0023 in [PLAN.md §14](docs/PLAN.md). Until those land,
+- `orch run --once` now invokes the planner, worker, critic, and
+  integrator wrappers as role inbox messages become actionable.
+- **Not yet wired:** continuous `orch run`, budget enforcement,
+  `orch doctor`, and the first-drive runbook. Those are tracked as
+  T-0020…T-0023 in [PLAN.md §14](docs/PLAN.md). Until those land,
   Orchestra is best treated as a substrate to develop against, not a
   hands-off autopilot.
 
@@ -146,16 +147,17 @@ Each call returns a JSON line describing what happened, e.g.:
 ```
 
 Possible `kind` values include `dispatched`, `planning_failed`,
-`plan_ingested`, `critic_dispatched`, `merged`, `merge_failed_reworking`,
-`critic_rework_dispatched`, `escalated`, `abandoned`, `idle`,
-`plan_rejected`, `ignored_message`.
+`plan_ingested`, `agent_ran`, `agent_failed`, `critic_dispatched`,
+`merged`, `merge_failed_reworking`, `critic_rework_dispatched`,
+`escalated`, `abandoned`, `idle`, `plan_rejected`, `ignored_message`.
 
-### Run the model wrappers (manual, for now)
+### Model wrapper execution
 
-Until T-0019 lands, the runtime invokes the planner but does not invoke
-the worker or critic CLIs itself. After `orch run --once` posts a
-message to one of those role inboxes, you must run the corresponding
-wrapper:
+`orch run --once` invokes the configured wrapper for the oldest
+actionable role inbox message (`worker`, `critic`, or `integrator`) and
+acknowledges that role message only after the wrapper exits successfully
+and emits a JSON handoff. You can still run wrappers manually for
+debugging:
 
 ```bash
 # After a worker dispatch:
@@ -187,9 +189,9 @@ and posts the model's JSON handoff to the orchestrator inbox. The next
 orch submit "..."
 orch run --once          # → invokes planner and ingests pending tasks
 orch run --once          # → dispatches T-0001 to worker inbox
-orch-codex-worker ...    # → posts {"action": "worker_completed", ...}
+orch run --once          # → invokes worker wrapper; posts {"action": "worker_completed", ...}
 orch run --once          # → exports diff, dispatches to critic
-orch-gemini-critic ...   # → posts {"action": "critic_reviewed", "verdict": "approve"}
+orch run --once          # → invokes critic wrapper; posts {"action": "critic_reviewed", "verdict": "approve"}
 orch run --once          # → MergeDriver runs full suite, fast-forwards main
 ```
 

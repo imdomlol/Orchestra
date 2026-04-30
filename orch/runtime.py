@@ -45,6 +45,7 @@ class RunOnceResult:
     dispatch: DispatchResult | None = None
     critic_dispatch: CriticDispatchResult | None = None
     planner_result: WrapperResult | None = None
+    agent_result: WrapperResult | None = None
     inbox_message: InboxMessage | None = None
     plan_ingest: PlanIngestResult | None = None
     merge_result: MergeResult | None = None
@@ -138,6 +139,10 @@ class OrchestraRuntime:
         message = self.inbox.read_next("orchestrator")
         if message is not None:
             return self._handle_orchestrator_message(message)
+
+        agent_message = self._next_agent_message()
+        if agent_message is not None:
+            return self._drive_agent_message(agent_message)
 
         dispatch = self.dispatcher.dispatch_next()
         if dispatch is None:
@@ -254,6 +259,49 @@ class OrchestraRuntime:
             message=f"ingested {ingest.task_count} tasks",
             inbox_message=message,
             plan_ingest=ingest,
+        )
+
+    def _next_agent_message(self) -> InboxMessage | None:
+        for role in ("worker", "critic", "integrator"):
+            message = self.inbox.read_next(role)
+            if message is not None:
+                return message
+        return None
+
+    def _drive_agent_message(self, message: InboxMessage) -> RunOnceResult:
+        wrapper_role = {
+            "worker": "codex-worker",
+            "critic": "gemini-critic",
+            "integrator": "codex-integrator",
+        }.get(message.role)
+        if wrapper_role is None:
+            raise ValueError(f"unsupported agent inbox role: {message.role}")
+
+        wrapper = self.model_wrapper or ModelWrapper(root=self.root, inbox=self.inbox)
+        context = dict(message.body)
+        context.pop("role", None)
+        task_id = context.get("task_id")
+        log_name = task_id if isinstance(task_id, str) and task_id.strip() else message.id
+        result = wrapper.run_role(
+            wrapper_role,
+            log_name=log_name,
+            inbox_role="orchestrator",
+            **context,
+        )
+        if not result.succeeded:
+            return RunOnceResult(
+                kind="agent_failed",
+                message=f"{wrapper_role} failed; role inbox message left for retry",
+                agent_result=result,
+                inbox_message=message,
+            )
+
+        self.inbox.ack(message)
+        return RunOnceResult(
+            kind="agent_ran",
+            message=f"{wrapper_role} completed",
+            agent_result=result,
+            inbox_message=message,
         )
 
     def _ingest_planned_message(self, message: InboxMessage) -> PlanIngestResult:
@@ -462,6 +510,13 @@ def result_to_dict(result: RunOnceResult) -> dict[str, Any]:
         data["planner_stderr_path"] = str(result.planner_result.process.stderr_path)
         if result.planner_result.handoff_path is not None:
             data["planner_handoff_path"] = str(result.planner_result.handoff_path)
+    if result.agent_result is not None:
+        data["agent_role"] = result.agent_result.role
+        data["agent_returncode"] = result.agent_result.process.returncode
+        data["agent_stdout_path"] = str(result.agent_result.process.stdout_path)
+        data["agent_stderr_path"] = str(result.agent_result.process.stderr_path)
+        if result.agent_result.handoff_path is not None:
+            data["agent_handoff_path"] = str(result.agent_result.handoff_path)
     if result.inbox_message is not None:
         data["inbox_message"] = str(result.inbox_message.path)
     if result.plan_ingest is not None:
