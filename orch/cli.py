@@ -6,10 +6,12 @@ import argparse
 import json
 from pathlib import Path
 import shlex
+import signal
 import sys
+import threading
 
 from orch.images import SandboxImageBuilder
-from orch.runtime import OrchestraRuntime, result_to_dict
+from orch.runtime import OrchestraRuntime, RunOnceResult, result_to_dict
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,7 +29,24 @@ def main(argv: list[str] | None = None) -> int:
                 result = runtime.run_once()
                 print(json.dumps(result_to_dict(result), sort_keys=True))
                 return 0
-            parser.error("only --once is implemented")
+            stop_event = threading.Event()
+            previous_handlers: dict[int, signal.Handlers] = {}
+
+            def request_stop(signum: int, frame: object) -> None:
+                stop_event.set()
+
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, request_stop)
+            try:
+                result = runtime.run(
+                    stop_requested=stop_event.is_set,
+                    on_result=_print_run_result,
+                )
+                return 0 if result.kind in {"idle", "stopped"} else 1
+            finally:
+                for signum, handler in previous_handlers.items():
+                    signal.signal(signum, handler)
         if args.command == "image":
             builder = SandboxImageBuilder.from_config(root=args.root)
             if args.image_command == "build":
@@ -71,6 +90,10 @@ def _build_parser() -> argparse.ArgumentParser:
     build.add_argument("--no-cache", action="store_true", help="pass --no-cache to docker build")
     build.add_argument("--pull", action="store_true", help="pass --pull to docker build")
     return parser
+
+
+def _print_run_result(result: RunOnceResult) -> None:
+    print(json.dumps(result_to_dict(result), sort_keys=True), flush=True)
 
 
 if __name__ == "__main__":

@@ -13,14 +13,15 @@ This README is the user guide. For architecture and the task roadmap, see
 
 ## Status at a glance
 
-- Substrate complete: T-0001 through T-0019 (75 passing tests).
+- Substrate complete: T-0001 through T-0020 (78 passing tests).
 - The full local pipeline — request → plan ingest → worker dispatch →
   critic handoff → merge — is wired and tested with mocked subprocesses.
-- `orch run --once` now invokes the planner, worker, critic, and
-  integrator wrappers as role inbox messages become actionable.
-- **Not yet wired:** continuous `orch run`, budget enforcement,
-  `orch doctor`, and the first-drive runbook. Those are tracked as
-  T-0020…T-0023 in [PLAN.md §14](docs/PLAN.md). Until those land,
+- `orch run` now continuously invokes the planner, worker, critic, and
+  integrator wrappers as role inbox messages become actionable; use
+  `Ctrl-C` or SIGTERM for clean shutdown.
+- **Not yet wired:** budget enforcement, `orch doctor`, and the
+  first-drive runbook. Those are tracked as T-0021…T-0023 in
+  [PLAN.md §14](docs/PLAN.md). Until those land,
   Orchestra is best treated as a substrate to develop against, not a
   hands-off autopilot.
 
@@ -117,10 +118,10 @@ uv run --extra dev pytest -v
 
 ## Daily workflow
 
-Orchestra's runtime is a **deterministic event loop** — each call to
-`orch run --once` processes exactly one inbox message or one dispatch
-decision and returns a JSON result. You drive a request by repeatedly
-ticking the loop.
+Orchestra's runtime is a **deterministic event loop**. `orch run --once`
+processes exactly one inbox message or one dispatch decision and returns
+a JSON result; `orch run` keeps polling and prints one JSON result per
+event until you stop it.
 
 ### Submit a request
 
@@ -150,6 +151,17 @@ Possible `kind` values include `dispatched`, `planning_failed`,
 `plan_ingested`, `agent_ran`, `agent_failed`, `critic_dispatched`,
 `merged`, `merge_failed_reworking`, `critic_rework_dispatched`,
 `escalated`, `abandoned`, `idle`, `plan_rejected`, `ignored_message`.
+
+### Run continuously
+
+```bash
+orch run
+```
+
+The continuous loop writes `.orch/locks/orchestrator.pid`, appends
+startup/shutdown events under `.orch/logs/orchestrator/`, sleeps for
+`[runtime] poll_interval_seconds` when idle, and removes the pid file on
+SIGINT/SIGTERM.
 
 ### Model wrapper execution
 
@@ -248,7 +260,8 @@ python scripts/validate_task.py examples/task.example.yaml
 ## Stopping, resuming, cleaning up
 
 - **Stop:** the `--once` loop is one-shot, so just don't tick it again.
-  A continuous `orch run` (T-0020) will support clean SIGINT shutdown.
+  Stop continuous `orch run` with `Ctrl-C` or SIGTERM; it logs shutdown
+  and removes `.orch/locks/orchestrator.pid`.
 - **Resume:** `orch run --once` calls `startup_reconcile` first. It
   reads every YAML in `.orch/tasks/active/`, replays the orchestrator
   inbox oldest-first, and clears stale `orchestrator.pid`. Files and
@@ -280,6 +293,7 @@ codex  = "codex"
 max_workers              = 1     # serial-by-default
 default_timeout_seconds  = 1800
 max_retries              = 2     # critic and integration retry cap
+poll_interval_seconds    = 2
 
 [sandbox]
 mode            = "docker"

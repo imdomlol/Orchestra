@@ -31,6 +31,7 @@ class RuntimeConfig:
     max_workers: int
     default_timeout_seconds: int
     max_retries: int
+    poll_interval_seconds: int = 2
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,9 @@ def load_config(config_dir: Path = DEFAULT_CONFIG_DIR) -> OrchestraConfig:
                 orchestrator, "runtime", "default_timeout_seconds", minimum=1
             ),
             max_retries=_required_int(orchestrator, "runtime", "max_retries", minimum=0),
+            poll_interval_seconds=_optional_int(
+                orchestrator, "runtime", "poll_interval_seconds", minimum=1, default=2
+            ),
         ),
         sandbox=SandboxConfig(
             mode=_required_choice(orchestrator, "sandbox", "mode", {"docker"}),
@@ -160,6 +164,21 @@ def _required_int(
     data: dict[str, Any], section: str | None, key: str, *, minimum: int
 ) -> int:
     value = _section(data, section).get(key)
+    if not isinstance(value, int) or value < minimum:
+        prefix = f"{section}." if section else ""
+        raise ValueError(f"{prefix}{key} must be an integer >= {minimum}")
+    return value
+
+
+def _optional_int(
+    data: dict[str, Any],
+    section: str | None,
+    key: str,
+    *,
+    minimum: int,
+    default: int,
+) -> int:
+    value = _section(data, section).get(key, default)
     if not isinstance(value, int) or value < minimum:
         prefix = f"{section}." if section else ""
         raise ValueError(f"{prefix}{key} must be an integer >= {minimum}")

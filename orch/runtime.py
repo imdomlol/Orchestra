@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import json
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Protocol
+import time
+from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 from orch.config import OrchestraConfig, RuntimeConfig, load_config
@@ -49,6 +51,14 @@ class RunOnceResult:
     inbox_message: InboxMessage | None = None
     plan_ingest: PlanIngestResult | None = None
     merge_result: MergeResult | None = None
+
+
+@dataclass(frozen=True)
+class RunLoopResult:
+    kind: str
+    message: str
+    iterations: int
+    last_result: RunOnceResult | None = None
 
 
 class OrchestraRuntime:
@@ -152,6 +162,63 @@ class OrchestraRuntime:
             message=f"dispatched {dispatch.task_id}",
             dispatch=dispatch,
         )
+
+    def run(
+        self,
+        *,
+        stop_requested: Callable[[], bool] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        on_result: Callable[[RunOnceResult], None] | None = None,
+        max_idle_cycles: int | None = None,
+    ) -> RunLoopResult:
+        """Continuously process runtime events until stopped.
+
+        ``max_idle_cycles`` is primarily for tests and controlled embedding;
+        ``None`` means wait indefinitely for future work.
+        """
+
+        if max_idle_cycles is not None and max_idle_cycles < 1:
+            raise ValueError("max_idle_cycles must be >= 1")
+
+        stop = stop_requested or (lambda: False)
+        iterations = 0
+        idle_cycles = 0
+        last_result: RunOnceResult | None = None
+        self._write_pid()
+        self._append_orchestrator_log("run_started", {"pid": os.getpid()})
+        try:
+            while not stop():
+                result = self.run_once()
+                iterations += 1
+                last_result = result
+                if on_result is not None:
+                    on_result(result)
+
+                if result.kind == "idle":
+                    idle_cycles += 1
+                    if max_idle_cycles is not None and idle_cycles >= max_idle_cycles:
+                        return RunLoopResult(
+                            kind="idle",
+                            message="run loop idle",
+                            iterations=iterations,
+                            last_result=last_result,
+                        )
+                    sleep(self.runtime_config.poll_interval_seconds)
+                else:
+                    idle_cycles = 0
+
+            return RunLoopResult(
+                kind="stopped",
+                message="run loop stopped",
+                iterations=iterations,
+                last_result=last_result,
+            )
+        finally:
+            self._append_orchestrator_log(
+                "run_shutdown",
+                {"pid": os.getpid(), "iterations": iterations},
+            )
+            self._remove_pid()
 
     def _handle_orchestrator_message(self, message: InboxMessage) -> RunOnceResult:
         action = message.body.get("action")
@@ -456,6 +523,50 @@ class OrchestraRuntime:
             return False
         pid_path.unlink()
         return True
+
+    def _write_pid(self) -> Path:
+        pid_path = self.root / ".orch" / "locks" / "orchestrator.pid"
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        if pid_path.exists():
+            raw_pid = pid_path.read_text(encoding="utf-8").strip()
+            try:
+                existing_pid = int(raw_pid)
+            except ValueError:
+                existing_pid = 0
+            if _pid_is_running(existing_pid):
+                raise RuntimeError(f"orchestrator already running with pid {existing_pid}")
+            pid_path.unlink()
+
+        temp_path = pid_path.with_suffix(".pid.tmp")
+        temp_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        os.replace(temp_path, pid_path)
+        self._fsync_dir(pid_path.parent)
+        return pid_path
+
+    def _remove_pid(self) -> None:
+        pid_path = self.root / ".orch" / "locks" / "orchestrator.pid"
+        if not pid_path.exists():
+            return
+        if pid_path.read_text(encoding="utf-8").strip() != str(os.getpid()):
+            return
+        pid_path.unlink()
+        self._fsync_dir(pid_path.parent)
+
+    def _append_orchestrator_log(self, event: str, payload: dict[str, Any]) -> Path:
+        log_dir = self.root / ".orch" / "logs" / "orchestrator"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"{datetime.now(UTC).strftime('%Y-%m-%d')}.jsonl"
+        entry = {
+            "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "event": event,
+            **payload,
+        }
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return log_path
 
     def _count_worktrees(self) -> int:
         result = subprocess.run(

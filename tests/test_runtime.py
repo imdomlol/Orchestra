@@ -66,6 +66,7 @@ def runtime(repo: Path) -> OrchestraRuntime:
             max_workers=1,
             default_timeout_seconds=60,
             max_retries=2,
+            poll_interval_seconds=1,
         ),
     )
 
@@ -787,4 +788,51 @@ def test_startup_reconcile_clears_stale_pid_and_counts_state(tmp_path: Path) -> 
     assert result.active_tasks == 1
     assert result.orchestrator_messages == 1
     assert result.worktrees == 1
+    assert not (repo / ".orch/locks/orchestrator.pid").exists()
+
+
+def test_run_loop_drains_work_until_idle_and_cleans_pid(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "unknown"})
+    seen: list[str] = []
+
+    result = runtime(repo).run(
+        sleep=lambda seconds: None,
+        on_result=lambda event: seen.append(event.kind),
+        max_idle_cycles=1,
+    )
+
+    assert result.kind == "idle"
+    assert result.iterations == 2
+    assert seen == ["ignored_message", "idle"]
+    assert not (repo / ".orch/locks/orchestrator.pid").exists()
+    log_files = list((repo / ".orch/logs/orchestrator").glob("*.jsonl"))
+    assert len(log_files) == 1
+    log_text = log_files[0].read_text(encoding="utf-8")
+    assert "run_started" in log_text
+    assert "run_shutdown" in log_text
+
+
+def test_run_loop_stops_on_stop_request_and_leaves_inbox_state(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "unknown"})
+    calls = 0
+
+    def stop_requested() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls > 1
+
+    result = runtime(repo).run(
+        stop_requested=stop_requested,
+        sleep=lambda seconds: None,
+    )
+
+    assert result.kind == "stopped"
+    assert result.iterations == 1
+    assert inbox.read_next("orchestrator") is None
     assert not (repo / ".orch/locks/orchestrator.pid").exists()

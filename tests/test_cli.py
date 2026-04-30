@@ -4,8 +4,10 @@ from pathlib import Path
 import shutil
 import subprocess
 
+import orch.cli as cli
 from orch.cli import main
 from orch.inbox import Inbox
+from orch.runtime import RunLoopResult, RunOnceResult
 
 
 def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -62,6 +64,36 @@ def test_run_once_cli_reports_idle(tmp_path: Path, capsys) -> None:
     code = main(["--root", str(repo), "run", "--once"])
 
     assert code == 0
+    assert '"kind": "idle"' in capsys.readouterr().out
+
+
+def test_run_cli_starts_continuous_loop(tmp_path: Path, capsys, monkeypatch) -> None:
+    repo = init_repo(tmp_path)
+    copy_configured_layout(repo)
+    calls: list[dict] = []
+
+    class FakeRuntime:
+        @classmethod
+        def from_config(cls, *, root: Path):
+            assert root == repo
+            return cls()
+
+        def run(self, *, stop_requested, on_result):
+            calls.append({"stop_requested": stop_requested, "on_result": on_result})
+            on_result(RunOnceResult(kind="idle", message="no actionable work"))
+            return RunLoopResult(
+                kind="stopped",
+                message="run loop stopped",
+                iterations=1,
+                last_result=None,
+            )
+
+    monkeypatch.setattr(cli, "OrchestraRuntime", FakeRuntime)
+
+    code = main(["--root", str(repo), "run"])
+
+    assert code == 0
+    assert len(calls) == 1
     assert '"kind": "idle"' in capsys.readouterr().out
 
 

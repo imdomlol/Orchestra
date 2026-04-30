@@ -13,6 +13,7 @@ codex = "codex"
 max_workers = 1
 default_timeout_seconds = 1800
 max_retries = 2
+poll_interval_seconds = 2
 
 [sandbox]
 mode = "docker"

@@ -5,22 +5,24 @@ single source of truth for the project's design and scope. Other models and
 contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
-**Status:** design complete; substrate tasks T-0001…T-0019 implemented and
-tested (75 passing tests). T-0018 planner auto-invocation is now wired:
+**Status:** design complete; substrate tasks T-0001…T-0020 implemented and
+tested (78 passing tests). T-0018 planner auto-invocation is now wired:
 `submit_request` invokes the planner wrapper, consumes its `planned`
 handoff, and ingests validated pending tasks without manual wrapper
 execution. T-0019 agent-driver invocation is also wired: `run_once`
 consumes worker, critic, and integrator inbox messages by invoking the
 matching wrapper and only acknowledges those role messages after a
-successful handoff. The full local pipeline — request submission, plan
-ingestion, worker dispatch, worker→critic handoff, and critic verdict
-routing through `MergeDriver`, rework, escalation, or abandonment — is in
-place and exercised by the unit suite.
+successful handoff. T-0020 continuous `orch run` is wired: the runtime
+polls for actionable work, sleeps on idle using the configured interval,
+and shuts down cleanly on SIGINT/SIGTERM. The full local pipeline —
+request submission, plan ingestion, worker dispatch, worker→critic
+handoff, and critic verdict routing through `MergeDriver`, rework,
+escalation, or abandonment — is in place and exercised by the unit suite.
 
-What is **not** yet wired: a continuous `orch run` loop, budget
-enforcement, an `orch doctor` preflight, and a first-drive runbook. Those
+What is **not** yet wired: budget enforcement, an `orch doctor`
+preflight, and a first-drive runbook. Those
 pieces are the work required before a user can do a real end-to-end test
-drive — captured as T-0020…T-0023 in §14.
+drive — captured as T-0021…T-0023 in §14.
 
 ---
 
@@ -244,8 +246,8 @@ authoritative; in-memory state is not.
 
 ## 11. What's Built vs What's Designed
 
-**Designed only (this doc):** a continuous `orch run` event loop; budget
-enforcement; an `orch doctor` preflight; and the first-drive runbook. See
+**Designed only (this doc):** budget enforcement; an `orch doctor`
+preflight; and the first-drive runbook. See
 §14 for the concrete tasks required to enable a first end-to-end test
 drive.
 
@@ -470,9 +472,10 @@ throwaway repo." This section enumerates the discrete tasks required
 before a user can perform a first real end-to-end run.
 
 The shape of the remaining gap: `run_once` now spawns the planner,
-worker, critic, and integrator wrappers, but several safety rails
-(continuous polling, budgets, preflight checks, kill switch
-documentation) are not yet in place. T-0020…T-0023 close that gap.
+worker, critic, and integrator wrappers, and `orch run` continuously
+polls that substrate. Several safety rails (budgets, preflight checks,
+kill switch documentation) are not yet in place. T-0021…T-0023 close
+that gap.
 
 **T-0018 planner-auto-invocation — implemented**
   - Objective: When the runtime processes a `submit_request` message,
@@ -507,7 +510,7 @@ documentation) are not yet in place. T-0020…T-0023 close that gap.
     - The worker→critic→merge happy path is exercised end-to-end with
       mocked wrappers; no manual CLI invocation is required.
 
-**T-0020 continuous-run-loop**
+**T-0020 continuous-run-loop — implemented**
   - Objective: Implement `orch run` (without `--once`) as a continuous
     loop that drains actionable work, sleeps for a configurable poll
     interval, and terminates cleanly on SIGINT/SIGTERM.
@@ -573,7 +576,7 @@ documentation) are not yet in place. T-0020…T-0023 close that gap.
       safe to delete between runs, and how `startup_reconcile` resumes
       partial work.
 
-After T-0020…T-0023 land, a user with valid Gemini and Codex credentials
+After T-0021…T-0023 land, a user with valid Gemini and Codex credentials
 and a working Docker daemon should be able to clone Orchestra, run
 `orch doctor`, `orch image build`, `orch submit "..."`, and `orch run`,
 and watch a small change land on `main` of a target repo. That is the

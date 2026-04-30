@@ -14,6 +14,7 @@ def test_loads_default_config() -> None:
     assert config.models.orchestrator == "claude-opus"
     assert config.cli.gemini == "gemini"
     assert config.runtime.max_workers == 1
+    assert config.runtime.poll_interval_seconds == 2
     assert config.sandbox.mode == "docker"
     assert config.sandbox.image == "orchestra-sandbox:py3.12"
     assert config.sandbox.dockerfile == "docker/orchestra-sandbox.Dockerfile"
