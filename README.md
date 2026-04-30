@@ -305,8 +305,8 @@ network         = "none"
 workdir         = "/workspace"
 
 [budgets]
-max_tasks_per_request   = 5      # parsed; not yet enforced (T-0021)
-max_wall_clock_minutes  = 60     # parsed; not yet enforced (T-0021)
+max_tasks_per_request   = 5      # plan ingest rejects larger task batches
+max_wall_clock_minutes  = 60     # continuous runs stop when recoverable work remains past this cap
 ```
 
 ---

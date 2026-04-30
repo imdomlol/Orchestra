@@ -19,6 +19,8 @@ def test_loads_default_config() -> None:
     assert config.sandbox.image == "orchestra-sandbox:py3.12"
     assert config.sandbox.dockerfile == "docker/orchestra-sandbox.Dockerfile"
     assert config.sandbox.build_context == "."
+    assert config.budgets.max_tasks_per_request == 5
+    assert config.budgets.max_wall_clock_minutes == 60
     assert ".git/**" in config.policies.forbidden_globs
 
 

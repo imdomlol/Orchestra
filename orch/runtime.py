@@ -12,12 +12,12 @@ import time
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
-from orch.config import OrchestraConfig, RuntimeConfig, load_config
+from orch.config import BudgetConfig, OrchestraConfig, RuntimeConfig, load_config
 from orch.dispatcher import DispatchResult, Dispatcher
 from orch.inbox import Inbox, InboxMessage
 from orch.merge import MergeDriver, MergeResult
 from orch.model_wrapper import ModelWrapper, WrapperResult
-from orch.plans import PlanIngestResult, PlanIngestor
+from orch.plans import PlanBudgetExceeded, PlanIngestResult, PlanIngestor
 from orch.review import CriticDispatchResult, ReviewDispatcher
 from orch.task_store import ReviewNote, TaskStore
 
@@ -69,6 +69,7 @@ class OrchestraRuntime:
         *,
         root: Path = Path("."),
         runtime_config: RuntimeConfig,
+        budget_config: BudgetConfig | None = None,
         task_store: TaskStore | None = None,
         inbox: Inbox | None = None,
         dispatcher: Dispatcher | None = None,
@@ -79,6 +80,10 @@ class OrchestraRuntime:
     ) -> None:
         self.root = root.resolve()
         self.runtime_config = runtime_config
+        self.budget_config = budget_config or BudgetConfig(
+            max_tasks_per_request=5,
+            max_wall_clock_minutes=60,
+        )
         self.task_store = task_store or TaskStore(self.root)
         self.inbox = inbox or Inbox(self.root)
         self.dispatcher = dispatcher or Dispatcher(
@@ -112,7 +117,12 @@ class OrchestraRuntime:
         resolved_root = root.resolve()
         loaded = config or load_config(resolved_root / ".orch" / "config")
         merge_driver = MergeDriver.from_config(root=resolved_root, config=loaded)
-        return cls(root=resolved_root, runtime_config=loaded.runtime, merge_driver=merge_driver)
+        return cls(
+            root=resolved_root,
+            runtime_config=loaded.runtime,
+            budget_config=loaded.budgets,
+            merge_driver=merge_driver,
+        )
 
     def submit(self, prompt: str) -> SubmitResult:
         if not prompt.strip():
@@ -168,6 +178,7 @@ class OrchestraRuntime:
         *,
         stop_requested: Callable[[], bool] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
         on_result: Callable[[RunOnceResult], None] | None = None,
         max_idle_cycles: int | None = None,
     ) -> RunLoopResult:
@@ -184,15 +195,49 @@ class OrchestraRuntime:
         iterations = 0
         idle_cycles = 0
         last_result: RunOnceResult | None = None
+        deadline = monotonic() + (self.budget_config.max_wall_clock_minutes * 60)
         self._write_pid()
         self._append_orchestrator_log("run_started", {"pid": os.getpid()})
         try:
             while not stop():
+                if monotonic() >= deadline and self._has_recoverable_work():
+                    result = RunOnceResult(
+                        kind="budget_exceeded",
+                        message=(
+                            "max_wall_clock_minutes exceeded; recoverable work remains"
+                        ),
+                    )
+                    iterations += 1
+                    last_result = result
+                    self._append_orchestrator_log(
+                        "budget_exceeded",
+                        {
+                            "budget": "max_wall_clock_minutes",
+                            "limit": self.budget_config.max_wall_clock_minutes,
+                        },
+                    )
+                    if on_result is not None:
+                        on_result(result)
+                    return RunLoopResult(
+                        kind="budget_exceeded",
+                        message=result.message,
+                        iterations=iterations,
+                        last_result=last_result,
+                    )
+
                 result = self.run_once()
                 iterations += 1
                 last_result = result
                 if on_result is not None:
                     on_result(result)
+
+                if result.kind == "budget_exceeded":
+                    return RunLoopResult(
+                        kind="budget_exceeded",
+                        message=result.message,
+                        iterations=iterations,
+                        last_result=last_result,
+                    )
 
                 if result.kind == "idle":
                     idle_cycles += 1
@@ -298,7 +343,24 @@ class OrchestraRuntime:
                 inbox_message=message,
             )
 
-        ingest = self._ingest_planned_message(planned_message)
+        try:
+            ingest = self._ingest_planned_message(planned_message)
+        except PlanBudgetExceeded as exc:
+            self.inbox.ack(message)
+            self._record_budget_exceeded(
+                "max_tasks_per_request",
+                {
+                    "limit": exc.max_tasks,
+                    "actual": exc.task_count,
+                    "plan_message": str(planned_message.path.relative_to(self.root)),
+                },
+            )
+            return RunOnceResult(
+                kind="budget_exceeded",
+                message=str(exc),
+                planner_result=planner,
+                inbox_message=planned_message,
+            )
         self.inbox.ack(message)
         self.inbox.ack(planned_message)
         return RunOnceResult(
@@ -310,7 +372,18 @@ class OrchestraRuntime:
         )
 
     def _handle_planned(self, message: InboxMessage) -> RunOnceResult:
-        ingest = self._ingest_planned_message(message)
+        try:
+            ingest = self._ingest_planned_message(message)
+        except PlanBudgetExceeded as exc:
+            self._record_budget_exceeded(
+                "max_tasks_per_request",
+                {"limit": exc.max_tasks, "actual": exc.task_count},
+            )
+            return RunOnceResult(
+                kind="budget_exceeded",
+                message=str(exc),
+                inbox_message=message,
+            )
         self.inbox.ack(message)
         dispatch = self.dispatcher.dispatch_next()
         if dispatch is not None:
@@ -375,7 +448,25 @@ class OrchestraRuntime:
         plan_path = message.body.get("plan_path")
         if not isinstance(plan_path, str) or not plan_path.strip():
             raise ValueError("planned message must include plan_path")
-        return self.plan_ingestor.ingest(plan_path)
+        return self.plan_ingestor.ingest(
+            plan_path,
+            max_tasks=self.budget_config.max_tasks_per_request,
+        )
+
+    def _record_budget_exceeded(self, budget: str, payload: dict[str, Any]) -> Path:
+        return self._append_orchestrator_log(
+            "budget_exceeded",
+            {"budget": budget, **payload},
+        )
+
+    def _has_recoverable_work(self) -> bool:
+        for role in ("orchestrator", "worker", "critic", "integrator"):
+            if self.inbox.list_messages(role):
+                return True
+        for state in ("pending", "active"):
+            if self.task_store.list_tasks(state):
+                return True
+        return False
 
     def _handle_critic_reviewed(self, message: InboxMessage) -> RunOnceResult:
         body = message.body

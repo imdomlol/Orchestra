@@ -6,7 +6,7 @@ import shutil
 import pytest
 import yaml
 
-from orch.plans import PlanIngestor, extract_task_blocks
+from orch.plans import PlanBudgetExceeded, PlanIngestor, extract_task_blocks
 from orch.task_store import TaskStore
 
 
@@ -88,6 +88,20 @@ def test_ingest_validates_all_tasks_before_writing_any(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="objective"):
         PlanIngestor(tmp_path).ingest(plan_path)
+
+    assert TaskStore(tmp_path).list_tasks("pending") == []
+
+
+def test_ingest_rejects_task_count_budget_before_writing_any(tmp_path: Path) -> None:
+    copy_runtime_layout(tmp_path)
+    plan_path = tmp_path / ".orch/plans/P-0001.md"
+    plan_path.write_text(
+        plan_with_tasks(load_task("T-0001"), load_task("T-0002")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PlanBudgetExceeded, match="max_tasks_per_request=1"):
+        PlanIngestor(tmp_path).ingest(plan_path, max_tasks=1)
 
     assert TaskStore(tmp_path).list_tasks("pending") == []
 

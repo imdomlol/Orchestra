@@ -5,8 +5,8 @@ single source of truth for the project's design and scope. Other models and
 contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
-**Status:** design complete; substrate tasks T-0001…T-0020 implemented and
-tested (78 passing tests). T-0018 planner auto-invocation is now wired:
+**Status:** design complete; substrate tasks T-0001…T-0021 implemented and
+tested (82 passing tests). T-0018 planner auto-invocation is now wired:
 `submit_request` invokes the planner wrapper, consumes its `planned`
 handoff, and ingests validated pending tasks without manual wrapper
 execution. T-0019 agent-driver invocation is also wired: `run_once`
@@ -14,15 +14,16 @@ consumes worker, critic, and integrator inbox messages by invoking the
 matching wrapper and only acknowledges those role messages after a
 successful handoff. T-0020 continuous `orch run` is wired: the runtime
 polls for actionable work, sleeps on idle using the configured interval,
-and shuts down cleanly on SIGINT/SIGTERM. The full local pipeline —
-request submission, plan ingestion, worker dispatch, worker→critic
-handoff, and critic verdict routing through `MergeDriver`, rework,
-escalation, or abandonment — is in place and exercised by the unit suite.
+and shuts down cleanly on SIGINT/SIGTERM. T-0021 budget enforcement is
+now wired for plan task-count caps and continuous-run wall-clock caps. The
+full local pipeline — request submission, plan ingestion, worker
+dispatch, worker→critic handoff, and critic verdict routing through
+`MergeDriver`, rework, escalation, or abandonment — is in place and
+exercised by the unit suite.
 
-What is **not** yet wired: budget enforcement, an `orch doctor`
-preflight, and a first-drive runbook. Those
-pieces are the work required before a user can do a real end-to-end test
-drive — captured as T-0021…T-0023 in §14.
+What is **not** yet wired: an `orch doctor` preflight and a first-drive
+runbook. Those pieces are the work required before a user can do a real
+end-to-end test drive — captured as T-0022…T-0023 in §14.
 
 ---
 
@@ -246,10 +247,9 @@ authoritative; in-memory state is not.
 
 ## 11. What's Built vs What's Designed
 
-**Designed only (this doc):** budget enforcement; an `orch doctor`
-preflight; and the first-drive runbook. See
-§14 for the concrete tasks required to enable a first end-to-end test
-drive.
+**Designed only (this doc):** an `orch doctor` preflight and the
+first-drive runbook. See §14 for the concrete tasks required to enable a
+first end-to-end test drive.
 
 **Implemented runtime tasks:**
 1. **T-0001 repo-skeleton** — `.orch/` tree + `.gitignore` + `README.md`.
@@ -466,16 +466,15 @@ drive.
 
 ## 14. First Test Drive — Required Implementation
 
-T-0001…T-0019 give us a working substrate, but several pieces sit between
+T-0001…T-0021 give us a working substrate, but several pieces sit between
 "unit tests pass" and "Orchestra autonomously lands a small change on a
 throwaway repo." This section enumerates the discrete tasks required
 before a user can perform a first real end-to-end run.
 
 The shape of the remaining gap: `run_once` now spawns the planner,
 worker, critic, and integrator wrappers, and `orch run` continuously
-polls that substrate. Several safety rails (budgets, preflight checks,
-kill switch documentation) are not yet in place. T-0021…T-0023 close
-that gap.
+polls that substrate with budget caps. Preflight checks and kill switch
+documentation are not yet in place. T-0022…T-0023 close that gap.
 
 **T-0018 planner-auto-invocation — implemented**
   - Objective: When the runtime processes a `submit_request` message,
@@ -526,7 +525,7 @@ that gap.
       `.orch/logs/orchestrator/`, removes the orchestrator pid file,
       and leaves active worktrees and inbox state intact for resume.
 
-**T-0021 budget-enforcement**
+**T-0021 budget-enforcement — implemented**
   - Objective: Wire `[budgets]` from `orchestrator.toml` into the
     runtime so first-time users have hard caps before pointing Orchestra
     at a real repo.

@@ -7,7 +7,7 @@ import subprocess
 
 import yaml
 
-from orch.config import RuntimeConfig
+from orch.config import BudgetConfig, RuntimeConfig
 from orch.inbox import Inbox
 from orch.model_wrapper import WrapperResult
 from orch.runner import ProcessResult
@@ -68,6 +68,19 @@ def runtime(repo: Path) -> OrchestraRuntime:
             max_retries=2,
             poll_interval_seconds=1,
         ),
+    )
+
+
+def low_task_budget_runtime(repo: Path) -> OrchestraRuntime:
+    return OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+            poll_interval_seconds=1,
+        ),
+        budget_config=BudgetConfig(max_tasks_per_request=1, max_wall_clock_minutes=60),
     )
 
 
@@ -461,6 +474,74 @@ def test_run_once_ingests_planner_handoff_then_dispatches(tmp_path: Path) -> Non
     assert inbox.read_next("orchestrator") is None
 
 
+def test_run_once_rejects_over_budget_plan_without_ack_or_partial_tasks(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    plan_path = repo / ".orch/plans/P-0001.md"
+    plan_path.write_text(
+        "# Plan\n\n"
+        f"```yaml\n{yaml.safe_dump(load_task('T-0001'), sort_keys=False)}```\n\n"
+        f"```yaml\n{yaml.safe_dump(load_task('T-0002'), sort_keys=False)}```",
+        encoding="utf-8",
+    )
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "planned", "plan_path": ".orch/plans/P-0001.md"})
+
+    result = low_task_budget_runtime(repo).run_once()
+
+    assert result.kind == "budget_exceeded"
+    assert "max_tasks_per_request=1" in result.message
+    assert TaskStore(repo).list_tasks("pending") == []
+    assert inbox.read_next("orchestrator") is not None
+    log_files = list((repo / ".orch/logs/orchestrator").glob("*.jsonl"))
+    assert len(log_files) == 1
+    assert "budget_exceeded" in log_files[0].read_text(encoding="utf-8")
+
+
+def test_submit_request_budget_rejection_acks_submit_and_preserves_planned_handoff(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    plan_path = repo / ".orch/plans/P-0001.md"
+    plan_path.write_text(
+        "# Plan\n\n"
+        f"```yaml\n{yaml.safe_dump(load_task('T-0001'), sort_keys=False)}```\n\n"
+        f"```yaml\n{yaml.safe_dump(load_task('T-0002'), sort_keys=False)}```",
+        encoding="utf-8",
+    )
+    inbox = Inbox(repo)
+    inbox.post(
+        "orchestrator",
+        {"action": "submit_request", "request_path": ".orch/requests/R.md"},
+    )
+    wrapper = FakePlannerWrapper(
+        planner_result(
+            repo,
+            handoff={"action": "planned", "plan_path": ".orch/plans/P-0001.md"},
+        )
+    )
+
+    result = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        budget_config=BudgetConfig(max_tasks_per_request=1, max_wall_clock_minutes=60),
+        model_wrapper=wrapper,
+    ).run_once()
+
+    assert result.kind == "budget_exceeded"
+    assert TaskStore(repo).list_tasks("pending") == []
+    planned = inbox.read_next("orchestrator")
+    assert planned is not None
+    assert planned.body["action"] == "planned"
+
+
 def test_run_once_leaves_invalid_planner_handoff_unacked(tmp_path: Path) -> None:
     repo = init_repo(tmp_path)
     copy_runtime_layout(repo)
@@ -835,4 +916,36 @@ def test_run_loop_stops_on_stop_request_and_leaves_inbox_state(tmp_path: Path) -
     assert result.kind == "stopped"
     assert result.iterations == 1
     assert inbox.read_next("orchestrator") is None
+    assert not (repo / ".orch/locks/orchestrator.pid").exists()
+
+
+def test_run_loop_exits_when_wall_clock_budget_is_hit_with_work_remaining(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    TaskStore(repo).write_pending(load_task())
+    ticks = iter([0.0, 61.0])
+    seen: list[str] = []
+    orch = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+            poll_interval_seconds=1,
+        ),
+        budget_config=BudgetConfig(max_tasks_per_request=5, max_wall_clock_minutes=1),
+    )
+
+    result = orch.run(
+        sleep=lambda seconds: None,
+        monotonic=lambda: next(ticks),
+        on_result=lambda event: seen.append(event.kind),
+    )
+
+    assert result.kind == "budget_exceeded"
+    assert result.iterations == 1
+    assert seen == ["budget_exceeded"]
+    assert TaskStore(repo).read("T-0001")["status"] == "pending"
     assert not (repo / ".orch/locks/orchestrator.pid").exists()

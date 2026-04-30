@@ -26,6 +26,17 @@ class PlanIngestResult:
         return len(self.task_paths)
 
 
+class PlanBudgetExceeded(ValueError):
+    """Raised when a plan would exceed configured ingestion budgets."""
+
+    def __init__(self, *, task_count: int, max_tasks: int) -> None:
+        self.task_count = task_count
+        self.max_tasks = max_tasks
+        super().__init__(
+            f"plan contains {task_count} tasks, exceeding max_tasks_per_request={max_tasks}"
+        )
+
+
 class PlanIngestor:
     """Convert embedded planner task YAML blocks into pending task files."""
 
@@ -33,12 +44,14 @@ class PlanIngestor:
         self.root = root.resolve()
         self.task_store = task_store or TaskStore(self.root)
 
-    def ingest(self, plan_path: Path | str) -> PlanIngestResult:
+    def ingest(self, plan_path: Path | str, *, max_tasks: int | None = None) -> PlanIngestResult:
         resolved_plan = self._resolve_inside_root(plan_path)
         content = resolved_plan.read_text(encoding="utf-8")
         tasks = extract_task_blocks(content)
         if not tasks:
             raise ValueError(f"plan contains no task YAML blocks: {resolved_plan}")
+        if max_tasks is not None and len(tasks) > max_tasks:
+            raise PlanBudgetExceeded(task_count=len(tasks), max_tasks=max_tasks)
 
         seen_ids: set[str] = set()
         for task in tasks:

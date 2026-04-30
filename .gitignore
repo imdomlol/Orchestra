@@ -16,3 +16,6 @@ build/
 
 .codex
 .claude
+
+.text-*
+.uv-*
