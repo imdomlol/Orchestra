@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 import shlex
 import signal
@@ -28,10 +27,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "run":
             OrchestraRuntime, result_to_dict = _runtime_api()
-            runtime = OrchestraRuntime.from_config(root=args.root)
+            runtime = OrchestraRuntime.from_config(
+                root=args.root,
+                on_progress=_print_progress,
+            )
             if args.once:
                 result = runtime.run_once()
-                print(json.dumps(result_to_dict(result), sort_keys=True))
+                _print_run_result(result)
                 return 0
             stop_event = threading.Event()
             previous_handlers: dict[int, signal.Handlers] = {}
@@ -110,9 +112,35 @@ def _runtime_api():
     return runtime_class, result_to_dict
 
 
+_RESULT_LABELS: dict[str, str] = {
+    "idle": "Idle — nothing to do",
+    "stopped": "Stopped",
+    "dispatched": "Task dispatched",
+    "plan_ingested": "Plan ingested",
+    "planning_failed": "Planning failed",
+    "plan_rejected": "Plan rejected",
+    "critic_dispatched": "Sent to critic",
+    "critic_rework_dispatched": "Critic requested changes — reworking",
+    "agent_ran": "Agent completed",
+    "agent_failed": "Agent failed",
+    "merged": "Merged",
+    "merge_failed_reworking": "Merge failed — reworking",
+    "escalated": "Escalated (blocked)",
+    "abandoned": "Abandoned",
+    "budget_exceeded": "Budget exceeded",
+    "ignored_message": "Ignored message",
+}
+
+
+def _print_progress(message: str) -> None:
+    print(f"  → {message}", flush=True)
+
+
 def _print_run_result(result: object) -> None:
-    _, result_to_dict = _runtime_api()
-    print(json.dumps(result_to_dict(result), sort_keys=True), flush=True)
+    kind = getattr(result, "kind", "unknown")
+    message = getattr(result, "message", "")
+    label = _RESULT_LABELS.get(kind, kind)
+    print(f"[{label}] {message}", flush=True)
 
 
 if __name__ == "__main__":

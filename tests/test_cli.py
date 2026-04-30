@@ -65,7 +65,7 @@ def test_run_once_cli_reports_idle(tmp_path: Path, capsys) -> None:
     code = main(["--root", str(repo), "run", "--once"])
 
     assert code == 0
-    assert '"kind": "idle"' in capsys.readouterr().out
+    assert "Idle" in capsys.readouterr().out
 
 
 def test_run_cli_starts_continuous_loop(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -75,7 +75,7 @@ def test_run_cli_starts_continuous_loop(tmp_path: Path, capsys, monkeypatch) -> 
 
     class FakeRuntime:
         @classmethod
-        def from_config(cls, *, root: Path):
+        def from_config(cls, *, root: Path, on_progress=None):
             assert root == repo
             return cls()
 
@@ -95,7 +95,7 @@ def test_run_cli_starts_continuous_loop(tmp_path: Path, capsys, monkeypatch) -> 
 
     assert code == 0
     assert len(calls) == 1
-    assert '"kind": "idle"' in capsys.readouterr().out
+    assert "Idle" in capsys.readouterr().out
 
 
 def test_image_build_prints_configured_docker_command(tmp_path: Path, capsys) -> None:

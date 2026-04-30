@@ -77,6 +77,7 @@ class OrchestraRuntime:
         review_dispatcher: ReviewDispatcher | None = None,
         merge_driver: MergeDriver | None = None,
         model_wrapper: RoleRunner | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> None:
         self.root = root.resolve()
         self.runtime_config = runtime_config
@@ -106,6 +107,11 @@ class OrchestraRuntime:
             task_store=self.task_store,
         )
         self.model_wrapper = model_wrapper
+        self._on_progress = on_progress
+
+    def _progress(self, message: str) -> None:
+        if self._on_progress is not None:
+            self._on_progress(message)
 
     @classmethod
     def from_config(
@@ -113,6 +119,7 @@ class OrchestraRuntime:
         *,
         root: Path = Path("."),
         config: OrchestraConfig | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> "OrchestraRuntime":
         resolved_root = root.resolve()
         loaded = config or load_config(resolved_root / ".orch" / "config")
@@ -122,6 +129,7 @@ class OrchestraRuntime:
             runtime_config=loaded.runtime,
             budget_config=loaded.budgets,
             merge_driver=merge_driver,
+            on_progress=on_progress,
         )
 
     def submit(self, prompt: str) -> SubmitResult:
@@ -309,12 +317,14 @@ class OrchestraRuntime:
             root=self.root,
             inbox=self.inbox,
         )
+        self._progress("Calling Gemini planner...")
         planner = planner_wrapper.run_role(
             "gemini-planner",
             request_path=request_path,
             log_name=Path(request_path).stem,
             inbox_role="orchestrator",
         )
+        self._progress(f"Gemini planner returned (exit {planner.process.returncode})")
         if not planner.process.succeeded:
             self.inbox.ack(message)
             return RunOnceResult(
@@ -422,12 +432,15 @@ class OrchestraRuntime:
         context.pop("role", None)
         task_id = context.get("task_id")
         log_name = task_id if isinstance(task_id, str) and task_id.strip() else message.id
+        label = f"{wrapper_role} on {task_id}" if task_id else wrapper_role
+        self._progress(f"Calling {label}...")
         result = wrapper.run_role(
             wrapper_role,
             log_name=log_name,
             inbox_role="orchestrator",
             **context,
         )
+        self._progress(f"{wrapper_role} returned (exit {result.process.returncode})")
         if not result.succeeded:
             return RunOnceResult(
                 kind="agent_failed",
@@ -496,6 +509,7 @@ class OrchestraRuntime:
 
         if verdict == "approve":
             self.task_store.transition(task_id, "active", "integration_review")
+            self._progress(f"Critic approved {task_id}, merging...")
             merge = self.merge_driver.merge_task(task_id)
             if merge.merged:
                 self.inbox.ack(message)
