@@ -78,6 +78,7 @@ class OrchestraRuntime:
         merge_driver: MergeDriver | None = None,
         model_wrapper: RoleRunner | None = None,
         on_progress: Callable[[str], None] | None = None,
+        on_confirm: Callable[[str], bool] | None = None,
     ) -> None:
         self.root = root.resolve()
         self.runtime_config = runtime_config
@@ -108,10 +109,16 @@ class OrchestraRuntime:
         )
         self.model_wrapper = model_wrapper
         self._on_progress = on_progress
+        self._on_confirm = on_confirm
 
     def _progress(self, message: str) -> None:
         if self._on_progress is not None:
             self._on_progress(message)
+
+    def _confirm(self, message: str) -> bool:
+        if self._on_confirm is not None:
+            return self._on_confirm(message)
+        return False
 
     @classmethod
     def from_config(
@@ -120,6 +127,7 @@ class OrchestraRuntime:
         root: Path = Path("."),
         config: OrchestraConfig | None = None,
         on_progress: Callable[[str], None] | None = None,
+        on_confirm: Callable[[str], bool] | None = None,
     ) -> "OrchestraRuntime":
         resolved_root = root.resolve()
         loaded = config or load_config(resolved_root / ".orch" / "config")
@@ -130,6 +138,7 @@ class OrchestraRuntime:
             budget_config=loaded.budgets,
             merge_driver=merge_driver,
             on_progress=on_progress,
+            on_confirm=on_confirm,
         )
 
     def submit(self, prompt: str) -> SubmitResult:
@@ -325,22 +334,37 @@ class OrchestraRuntime:
             inbox_role="orchestrator",
         )
         self._progress(f"Gemini planner returned (exit {planner.process.returncode})")
-        if not planner.process.succeeded:
-            self.inbox.ack(message)
-            return RunOnceResult(
-                kind="planning_failed",
-                message="planner exited unsuccessfully",
-                planner_result=planner,
-                inbox_message=message,
+        if not planner.process.succeeded or planner.handoff is None or planner.handoff_path is None:
+            failure_reason = (
+                "planner exited unsuccessfully"
+                if not planner.process.succeeded
+                else "planner did not emit an Orchestra handoff"
             )
-        if planner.handoff is None or planner.handoff_path is None:
-            self.inbox.ack(message)
-            return RunOnceResult(
-                kind="planning_failed",
-                message="planner did not emit an Orchestra handoff",
-                planner_result=planner,
-                inbox_message=message,
-            )
+            if self._confirm(f"Gemini planner failed ({failure_reason}). Use Claude Opus as fallback planner?"):
+                self._progress("Calling Claude Opus planner...")
+                planner = planner_wrapper.run_role(
+                    "claude-planner",
+                    request_path=request_path,
+                    log_name=Path(request_path).stem,
+                    inbox_role="orchestrator",
+                )
+                self._progress(f"Claude planner returned (exit {planner.process.returncode})")
+            if not planner.process.succeeded:
+                self.inbox.ack(message)
+                return RunOnceResult(
+                    kind="planning_failed",
+                    message="planner exited unsuccessfully",
+                    planner_result=planner,
+                    inbox_message=message,
+                )
+            if planner.handoff is None or planner.handoff_path is None:
+                self.inbox.ack(message)
+                return RunOnceResult(
+                    kind="planning_failed",
+                    message="planner did not emit an Orchestra handoff",
+                    planner_result=planner,
+                    inbox_message=message,
+                )
 
         planned_message = self.inbox.read_path(planner.handoff_path)
         if planned_message.body.get("action") != "planned":

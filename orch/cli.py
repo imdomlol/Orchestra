@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime = OrchestraRuntime.from_config(
                 root=args.root,
                 on_progress=_print_progress,
+                on_confirm=_ask_confirm,
             )
             if args.once:
                 result = runtime.run_once()
@@ -134,6 +135,14 @@ _RESULT_LABELS: dict[str, str] = {
 
 def _print_progress(message: str) -> None:
     print(f"  → {message}", flush=True)
+
+
+def _ask_confirm(message: str) -> bool:
+    try:
+        answer = input(f"\n{message} [y/N] ").strip().lower()
+        return answer in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return False
 
 
 def _print_run_result(result: object) -> None:

@@ -28,6 +28,13 @@ ROLE_SPECS = {
         "log_role": "critic",
         "headless_args": ["-p", ""],
     },
+    "claude-planner": {
+        "prompt": "gemini-planner.md",
+        "cli": "claude",
+        "model": "orchestrator",
+        "log_role": "planner",
+        "headless_args": ["-p", ""],
+    },
     "codex-worker": {
         "prompt": "codex-worker.md",
         "cli": "codex",

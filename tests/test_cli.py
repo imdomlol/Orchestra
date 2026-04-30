@@ -75,7 +75,7 @@ def test_run_cli_starts_continuous_loop(tmp_path: Path, capsys, monkeypatch) -> 
 
     class FakeRuntime:
         @classmethod
-        def from_config(cls, *, root: Path, on_progress=None):
+        def from_config(cls, *, root: Path, on_progress=None, on_confirm=None):
             assert root == repo
             return cls()
 

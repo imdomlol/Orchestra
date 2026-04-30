@@ -24,6 +24,7 @@ class ModelConfig:
 class CliConfig:
     gemini: str
     codex: str
+    claude: str = "claude"
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ def load_config(config_dir: Path = DEFAULT_CONFIG_DIR) -> OrchestraConfig:
         cli=CliConfig(
             gemini=_required_str(orchestrator, "cli", "gemini"),
             codex=_required_str(orchestrator, "cli", "codex"),
+            claude=_section(orchestrator, "cli").get("claude", "claude") or "claude",
         ),
         runtime=RuntimeConfig(
             max_workers=_required_int(orchestrator, "runtime", "max_workers", minimum=1),
