@@ -226,10 +226,12 @@ shutdown and removes `.orch/locks/orchestrator.pid`.
 ## 8a. Opus-driven mode (`orch chat`)
 
 For human-supervised work, prefer the terminal chat driver. It uses the
-Anthropic Python SDK directly, so set an API key in the shell where you run it:
+Claude Agent SDK, so authenticate Claude Code first or set an API key in the
+shell where you run it:
 
 ```bash
-export ANTHROPIC_API_KEY=...
+claude login
+# or: export ANTHROPIC_API_KEY=...
 orch chat "Add a function add(a, b) to calc.py with a pytest unit test."
 ```
 
@@ -244,8 +246,8 @@ orch chat --once "say hi"
 orch chat --once --dry-run "say hi"
 ```
 
-The dry-run form is the only mode that does not require `ANTHROPIC_API_KEY`.
-Transcripts live under `.orch/logs/chat/`.
+The dry-run form is the only mode that does not require Claude Code OAuth or
+`ANTHROPIC_API_KEY`. Transcripts live under `.orch/logs/chat/`.
 
 ## 9. Inspect Successful Artifacts
 

@@ -1,13 +1,15 @@
-"""Terminal chat orchestration driven by Anthropic tool use."""
+"""Terminal chat orchestration driven by Claude Agent SDK tool use."""
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 from typing import Any, Callable, Iterable
@@ -18,6 +20,12 @@ from orch.config import load_config
 
 DEFAULT_MODEL = "claude-opus-4-7"
 MAX_RESULT_CHARS = 2048
+DISPLAY_PREVIEW_CHARS = 900
+DISPLAY_PREVIEW_LINES = 10
+CREDENTIAL_ERROR = (
+    "Claude credentials are required for orch chat; run `claude login` for "
+    "Claude Code OAuth or set ANTHROPIC_API_KEY. Use --dry-run to inspect setup."
+)
 
 
 @dataclass(frozen=True)
@@ -45,6 +53,8 @@ class ChatOrchestrator:
         use_cache: bool = True,
         dry_run: bool = False,
         client: Any | None = None,
+        query_func: Any | None = None,
+        sdk: Any | None = None,
         output: Any | None = None,
         input_func: Callable[[str], str] = input,
     ) -> None:
@@ -55,11 +65,14 @@ class ChatOrchestrator:
         self.dry_run = dry_run
         self.output = output if output is not None else sys.stdout
         self.input_func = input_func
+        self.client = client
+        self.query_func = query_func
+        self.sdk = sdk
         self.messages: list[dict[str, Any]] = []
+        self._sdk_tool_counter = 0
         self.session_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
         self.log_path = self.root / ".orch" / "logs" / "chat" / f"{self.session_id}.jsonl"
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self.client = client if client is not None else (None if dry_run else self._make_client())
 
     def run(self, initial_request: str | None = None, *, once: bool = False) -> int:
         if self.dry_run:
@@ -67,52 +80,24 @@ class ChatOrchestrator:
             print(f"dry-run: would start orch chat with {self.model}", file=self.output)
             return 0
 
-        if initial_request:
-            self._add_user_text(initial_request)
-            finished = self._drive_model_until_waiting()
-            if once:
-                return 0
-            if finished:
-                return 0
+        if once:
+            request = initial_request or sys.stdin.read().strip()
+            if request:
+                self._add_user_text(request)
+                try:
+                    return asyncio.run(self._run_once(request))
+                except KeyboardInterrupt:
+                    return 0 if self._confirm_exit() else 130
+            return 0
 
-        while not once:
-            try:
-                text = self.input_func("you> ")
-            except KeyboardInterrupt:
-                if self._confirm_exit():
-                    return 0
-                continue
-            except EOFError:
-                return 0
-
-            command = text.strip()
-            if not command:
-                continue
-            if command == "/quit":
-                return 0
-            if command == "/save":
-                print(str(self.log_path), file=self.output)
-                continue
-            if command.startswith("/model "):
-                self.model = command.removeprefix("/model ").strip()
-                print(f"model: {self.model}", file=self.output)
-                continue
-
-            self._add_user_text(text)
-            if self._drive_model_until_waiting():
-                return 0
-
-        if not initial_request:
-            stdin_text = sys.stdin.read().strip()
-            if stdin_text:
-                self._add_user_text(stdin_text)
-                self._drive_model_until_waiting()
-        return 0
+        try:
+            return asyncio.run(self._run_interactive(initial_request))
+        except KeyboardInterrupt:
+            return 0 if self._confirm_exit() else 130
 
     def request_payload(self) -> dict[str, Any]:
         return {
             "model": self.model,
-            "max_tokens": 4096,
             "system": self._system_blocks(),
             "tools": self.tool_definitions(),
             "messages": self.messages,
@@ -209,73 +194,174 @@ class ChatOrchestrator:
             return ToolExecution(name, arguments, "", str(exc), 1)
         return ToolExecution(name, arguments, "", f"unknown tool: {name}", 1)
 
-    def _drive_model_until_waiting(self) -> bool:
-        while True:
-            content = self._assistant_turn()
-            tool_uses = [block for block in content if _block_type(block) == "tool_use"]
-            if not tool_uses:
-                return _has_final_summary(content)
+    async def _run_once(self, request: str) -> int:
+        query_func = self.query_func or self._load_sdk().query
+        try:
+            await self._consume_response(query_func(prompt=request, options=self._sdk_options()))
+        except Exception as exc:
+            raise RuntimeError(_credential_error_message(exc)) from exc
+        return 0
 
-            result_blocks = []
-            logged_results = []
-            for block in tool_uses:
-                name = str(_block_value(block, "name", ""))
-                arguments = _block_value(block, "input", {}) or {}
-                tool_id = str(_block_value(block, "id", ""))
-                if not isinstance(arguments, dict):
-                    arguments = {}
-                print(f"\n-> {name}({json.dumps(arguments, sort_keys=True)})", file=self.output, flush=True)
-                result = self.execute_tool(name, arguments)
-                print(f"<- {self._summarize_result(result)}", file=self.output, flush=True)
-                payload = json.dumps(self._tool_payload_for_model(result), ensure_ascii=False)
-                result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_id,
-                        "content": payload,
-                        "is_error": result.exit_code != 0,
-                    }
+    async def _run_interactive(self, initial_request: str | None) -> int:
+        client = self.client or self._load_sdk().ClaudeSDKClient(options=self._sdk_options())
+        try:
+            async with client:
+                if initial_request:
+                    self._add_user_text(initial_request)
+                    await client.query(initial_request)
+                    if await self._consume_response(client.receive_response()):
+                        return 0
+
+                while True:
+                    try:
+                        text = self.input_func("you> ")
+                    except KeyboardInterrupt:
+                        if self._confirm_exit():
+                            return 0
+                        continue
+                    except EOFError:
+                        return 0
+
+                    command = text.strip()
+                    if not command:
+                        continue
+                    if command == "/quit":
+                        return 0
+                    if command == "/save":
+                        print(str(self.log_path), file=self.output)
+                        continue
+                    if command.startswith("/model "):
+                        self.model = command.removeprefix("/model ").strip()
+                        if hasattr(client, "set_model"):
+                            await client.set_model(self.model)
+                        print(f"model: {self.model}", file=self.output)
+                        continue
+
+                    self._add_user_text(text)
+                    await client.query(text)
+                    if await self._consume_response(client.receive_response()):
+                        return 0
+        except Exception as exc:
+            raise RuntimeError(_credential_error_message(exc)) from exc
+        return 0
+
+    async def _consume_response(self, messages: Any) -> bool:
+        content: list[Any] = []
+        streamed_text = False
+        async for message in messages:
+            if _message_kind(message) == "stream_event":
+                streamed_text = self._render_stream_event(message) or streamed_text
+                continue
+            if _message_kind(message) == "assistant":
+                blocks = list(getattr(message, "content", []))
+                content.extend(blocks)
+                if not streamed_text:
+                    for block in blocks:
+                        if _block_type(block) == "text":
+                            print(str(_block_value(block, "text", "")), end="", file=self.output, flush=True)
+                block_dicts = [_content_block_to_dict(b) for b in blocks]
+                self.messages.append({"role": "assistant", "content": block_dicts})
+                self._write_log(
+                    role="assistant",
+                    content=block_dicts,
+                    tool_calls=[b for b in block_dicts if b.get("type") == "tool_use"],
+                    tool_results=[],
                 )
-                logged_results.append({"tool_use_id": tool_id, "name": name, **result.as_payload()})
-            self.messages.append({"role": "user", "content": result_blocks})
-            self._write_log(role="user", content=result_blocks, tool_calls=[], tool_results=logged_results)
+                continue
+            if _message_kind(message) == "result":
+                print("", file=self.output, flush=True)
+                if getattr(message, "is_error", False):
+                    errors = getattr(message, "errors", None) or [getattr(message, "result", "Claude returned an error")]
+                    raise RuntimeError("; ".join(str(error) for error in errors if error))
+        return _has_final_summary(content)
 
-    def _assistant_turn(self) -> list[Any]:
-        payload = self.request_payload()
-        content: list[Any]
+    def _render_stream_event(self, message: Any) -> bool:
+        event = getattr(message, "event", {})
+        if not isinstance(event, dict) or event.get("type") != "content_block_delta":
+            return False
+        delta = event.get("delta", {})
+        if not isinstance(delta, dict) or delta.get("type") != "text_delta":
+            return False
+        text = delta.get("text")
+        if not isinstance(text, str):
+            return False
+        print(text, end="", file=self.output, flush=True)
+        return True
+
+    def _sdk_options(self) -> Any:
+        sdk = self._load_sdk()
+        definitions = self.tool_definitions()
+        server = sdk.create_sdk_mcp_server(
+            name="orchestra",
+            version="1.0.0",
+            tools=[self._sdk_tool_for(definition) for definition in definitions],
+        )
+        return sdk.ClaudeAgentOptions(
+            system_prompt=SYSTEM_PROMPT,
+            mcp_servers={"orchestra": server},
+            allowed_tools=[f"mcp__orchestra__{definition['name']}" for definition in definitions],
+            tools=[],
+            model=self.model,
+            cwd=self.root,
+        )
+
+    def _sdk_tool_for(self, definition: dict[str, Any]) -> Any:
+        sdk = self._load_sdk()
+        name = str(definition["name"])
+        description = str(definition["description"])
+        input_schema = _schema_without_cache(definition["input_schema"])
+
+        async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
+            return self._handle_sdk_tool_call(name, arguments)
+
+        return sdk.tool(name, description, input_schema)(handler)
+
+    def _handle_sdk_tool_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(arguments, dict):
+            arguments = {}
+        self._sdk_tool_counter += 1
+        tool_id = f"sdk-tool-{self._sdk_tool_counter}"
+        print(f"\n→ {name}({_format_tool_args(arguments)})", file=self.output, flush=True)
+        result = self.execute_tool(name, arguments)
+        print(f"← {self._summarize_result(result)}", file=self.output, flush=True)
+        payload = self._tool_payload_for_model(result)
+        result_block = {
+            "type": "tool_result",
+            "tool_use_id": tool_id,
+            "content": json.dumps(payload, ensure_ascii=False),
+            "is_error": result.exit_code != 0,
+        }
+        self.messages.append({"role": "user", "content": [result_block]})
+        self._write_log(
+            role="user",
+            content=[result_block],
+            tool_calls=[],
+            tool_results=[{"tool_use_id": tool_id, "name": name, **result.as_payload()}],
+        )
+        return {
+            "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+            "is_error": result.exit_code != 0,
+        }
+
+    def _load_sdk(self) -> Any:
+        if self.sdk is not None:
+            return self.sdk
         try:
-            with self.client.messages.stream(**payload) as stream:
-                for text in stream.text_stream:
-                    print(text, end="", file=self.output, flush=True)
-                message = stream.get_final_message()
-            print("", file=self.output, flush=True)
-            content = list(getattr(message, "content", []))
-        except AttributeError:
-            message = self.client.messages.create(**payload)
-            content = list(getattr(message, "content", message.get("content", [])))
-            for block in content:
-                if _block_type(block) == "text":
-                    print(str(_block_value(block, "text", "")), end="", file=self.output, flush=True)
-            print("", file=self.output, flush=True)
-
-        self.messages.append({"role": "assistant", "content": [_content_block_to_dict(b) for b in content]})
-        tool_calls = [_content_block_to_dict(b) for b in content if _block_type(b) == "tool_use"]
-        self._write_log(role="assistant", content=[_content_block_to_dict(b) for b in content], tool_calls=tool_calls, tool_results=[])
-        return content
-
-    def _add_user_text(self, text: str) -> None:
-        self.messages.append({"role": "user", "content": text})
-        self._write_log(role="user", content=text, tool_calls=[], tool_results=[])
-
-    def _make_client(self) -> Any:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is required for orch chat; use --dry-run to inspect setup")
-        try:
-            import anthropic
+            import claude_agent_sdk
         except ImportError as exc:
-            raise RuntimeError("install anthropic>=0.40 to use orch chat") from exc
-        return anthropic.Anthropic(api_key=api_key)
+            if not self._has_obvious_credentials():
+                raise RuntimeError(CREDENTIAL_ERROR) from exc
+            raise RuntimeError("install claude-agent-sdk>=0.1 to use orch chat") from exc
+        self.sdk = claude_agent_sdk
+        return self.sdk
+
+    def _has_obvious_credentials(self) -> bool:
+        if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            return True
+        config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+        if (config_dir / ".credentials.json").exists():
+            return True
+        return False
 
     def _system_blocks(self) -> list[dict[str, Any]]:
         blocks = [{"type": "text", "text": SYSTEM_PROMPT}]
@@ -313,6 +399,9 @@ class ChatOrchestrator:
         argv = shlex.split(command)
         if not _is_allowed_shell(argv):
             return ToolExecution("run_shell", arguments, "", f"command is not allowlisted: {command}", 1)
+        if shutil.which(argv[0]) is None:
+            extra = " Use grep for repository text search." if argv[0] == "rg" else ""
+            return ToolExecution("run_shell", arguments, "", f"command not found: {argv[0]}.{extra}", 127)
         completed = subprocess.run(
             argv,
             cwd=self.root,
@@ -323,10 +412,19 @@ class ChatOrchestrator:
         return ToolExecution("run_shell", arguments, completed.stdout, completed.stderr, completed.returncode)
 
     def _summarize_result(self, result: ToolExecution) -> str:
-        payload = result.stdout.strip() or result.stderr.strip() or f"exit {result.exit_code}"
-        if len(payload) > MAX_RESULT_CHARS:
-            payload = payload[:MAX_RESULT_CHARS] + f"... [truncated; full result in {self.log_path}]"
-        return payload.replace("\n", "\\n")
+        payload = result.stdout.strip() or result.stderr.strip()
+        if not payload:
+            return f"exit {result.exit_code}"
+
+        text = _display_preview(payload)
+        status = "ok" if result.exit_code == 0 else f"exit {result.exit_code}"
+        if result.name == "read_file":
+            path = result.arguments.get("path", "file")
+            return _summary_with_preview(f"{status}; read {path}", payload, text, self.log_path)
+        if result.name == "run_shell":
+            command = result.arguments.get("command", "command")
+            return _summary_with_preview(f"{status}; `{command}`", payload, text, self.log_path)
+        return _summary_with_preview(status, payload, text, self.log_path)
 
     def _tool_payload_for_model(self, result: ToolExecution) -> dict[str, Any]:
         payload = result.as_payload()
@@ -353,6 +451,10 @@ class ChatOrchestrator:
         }
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _add_user_text(self, text: str) -> None:
+        self.messages.append({"role": "user", "content": text})
+        self._write_log(role="user", content=text, tool_calls=[], tool_results=[])
 
     def _confirm_exit(self) -> bool:
         try:
@@ -405,6 +507,43 @@ def _object_schema(properties: dict[str, Any], required: list[str]) -> dict[str,
     }
 
 
+def _schema_without_cache(schema: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(schema)
+    cleaned.pop("cache_control", None)
+    return cleaned
+
+
+def _format_tool_args(arguments: dict[str, Any]) -> str:
+    parts = []
+    for key, value in arguments.items():
+        if isinstance(value, str):
+            display = value.replace("\n", "\\n")
+            if len(display) > 80:
+                display = display[:77] + "..."
+            parts.append(f"{key}={display!r}")
+        else:
+            parts.append(f"{key}={value!r}")
+    return ", ".join(parts)
+
+
+def _display_preview(payload: str) -> str:
+    lines = payload.splitlines()
+    preview = "\n".join(lines[:DISPLAY_PREVIEW_LINES])
+    if len(preview) > DISPLAY_PREVIEW_CHARS:
+        preview = preview[:DISPLAY_PREVIEW_CHARS].rstrip()
+    return preview
+
+
+def _summary_with_preview(header: str, payload: str, preview: str, log_path: Path) -> str:
+    lines = payload.splitlines()
+    truncated = len(lines) > DISPLAY_PREVIEW_LINES or len(preview) < len(payload)
+    if not preview:
+        return header
+    suffix = f"\n  ... full result in {log_path}" if truncated else ""
+    indented = "\n  ".join(preview.splitlines())
+    return f"{header}\n  {indented}{suffix}"
+
+
 def _str_arg(arguments: dict[str, Any], key: str) -> str:
     value = arguments.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -432,6 +571,8 @@ def _is_allowed_shell(argv: list[str]) -> bool:
         return True
     if argv[0] == "rg":
         return True
+    if argv[0] == "grep":
+        return True
     if argv[0] in {"cat", "sed", "head", "tail"}:
         if argv[0] == "sed" and any(arg == "-i" or arg.startswith("-i.") for arg in argv[1:]):
             return False
@@ -439,8 +580,36 @@ def _is_allowed_shell(argv: list[str]) -> bool:
     return False
 
 
+def _message_kind(message: Any) -> str:
+    name = message.__class__.__name__
+    if name == "AssistantMessage":
+        return "assistant"
+    if name == "ResultMessage":
+        return "result"
+    if name == "StreamEvent":
+        return "stream_event"
+    if isinstance(message, dict):
+        return str(message.get("type", ""))
+    return ""
+
+
 def _block_type(block: Any) -> str:
-    return str(_block_value(block, "type", ""))
+    if isinstance(block, dict):
+        return str(block.get("type", ""))
+    name = block.__class__.__name__
+    if name == "TextBlock":
+        return "text"
+    if name == "ToolUseBlock":
+        return "tool_use"
+    if name == "ToolResultBlock":
+        return "tool_result"
+    if name == "ThinkingBlock":
+        return "thinking"
+    if name == "ServerToolUseBlock":
+        return "server_tool_use"
+    if name == "ServerToolResultBlock":
+        return "server_tool_result"
+    return str(getattr(block, "type", ""))
 
 
 def _block_value(block: Any, key: str, default: Any = None) -> Any:
@@ -452,10 +621,12 @@ def _block_value(block: Any, key: str, default: Any = None) -> Any:
 def _content_block_to_dict(block: Any) -> dict[str, Any]:
     if isinstance(block, dict):
         return block
-    if hasattr(block, "model_dump"):
-        return block.model_dump()
     data = {"type": _block_type(block)}
-    for key in ("text", "id", "name", "input"):
+    if hasattr(block, "model_dump"):
+        dumped = block.model_dump()
+        dumped.setdefault("type", data["type"])
+        return dumped
+    for key in ("text", "thinking", "signature", "id", "name", "input", "tool_use_id", "content", "is_error"):
         value = getattr(block, key, None)
         if value is not None:
             data[key] = value
@@ -469,3 +640,17 @@ def _has_final_summary(content: Iterable[Any]) -> bool:
         if "final summary" in str(_block_value(block, "text", "")).lower():
             return True
     return False
+
+
+def _credential_error_message(exc: Exception) -> str:
+    text = str(exc)
+    lowered = text.lower()
+    if (
+        "authentication" in lowered
+        or "credentials" in lowered
+        or "api key" in lowered
+        or "oauth" in lowered
+        or "login" in lowered
+    ):
+        return CREDENTIAL_ERROR
+    return text

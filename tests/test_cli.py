@@ -501,6 +501,8 @@ def test_chat_cli_dry_run_without_api_key_exits_zero(tmp_path: Path, capsys, mon
     repo = init_repo(tmp_path)
     copy_configured_layout(repo)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty-claude"))
 
     code = main(["--root", str(repo), "chat", "--once", "--dry-run", "say hi"])
 
@@ -508,15 +510,19 @@ def test_chat_cli_dry_run_without_api_key_exits_zero(tmp_path: Path, capsys, mon
     assert "dry-run" in capsys.readouterr().out
 
 
-def test_chat_cli_requires_api_key_without_dry_run(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_chat_cli_requires_credentials_without_dry_run(tmp_path: Path, capsys, monkeypatch) -> None:
     repo = init_repo(tmp_path)
     copy_configured_layout(repo)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty-claude"))
 
     code = main(["--root", str(repo), "chat", "--once", "say hi"])
 
     assert code == 1
-    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "claude login" in err
+    assert "ANTHROPIC_API_KEY" in err
 
 
 def test_image_build_prints_configured_docker_command(tmp_path: Path, capsys) -> None:

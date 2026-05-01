@@ -538,7 +538,9 @@ test drive.
 29. **T-0029 opus-chat-cli**
     - Objective: Add `orch chat` as a terminal-native interactive
       orchestrator where Claude Opus drives the explicit orchestration
-      primitives through Anthropic SDK tool use.
+      primitives through Claude Agent SDK tool use. The implementation uses
+      Claude Code OAuth from `claude login` as the primary auth path and
+      falls back to `ANTHROPIC_API_KEY`.
     - Owned files: `orch/chat.py`, `orch/cli.py`, `orch/config.py`,
       `.orch/config/orchestrator.toml`, `pyproject.toml`,
       `tests/test_chat.py`, `tests/test_cli.py`, `README.md`,
@@ -547,10 +549,11 @@ test drive.
       - `orch chat "<request>"` and bare `orch chat` start a shell session
         with `/quit`, `/save`, and `/model <id>` slash commands.
       - `--once` runs one non-interactive turn, and `--dry-run` is the only
-        no-key path; otherwise `ANTHROPIC_API_KEY` is required.
-      - Opus receives cached system/tool blocks and tools for plan,
-        decompose, dispatch, diff, rework, merge, task listing, read-only
-        file reads, and allowlisted read-only shell commands.
+        no-credential path; otherwise `claude login` or `ANTHROPIC_API_KEY`
+        is required.
+      - Opus receives tools for plan, decompose, dispatch, diff, rework,
+        merge, task listing, read-only file reads, and allowlisted read-only
+        shell commands through an in-process SDK MCP server.
       - Tool calls shell out through existing CLI primitives where those
         primitives exist; non-zero exits are returned to the model.
       - Session transcripts are written under `.orch/logs/chat/`.

@@ -212,8 +212,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     chat = subparsers.add_parser("chat", help="run an interactive Opus-driven orchestrator")
     chat.add_argument("request", nargs="*", help="initial request; stdin is used with --once if omitted")
-    chat.add_argument("--model", help="Anthropic model id")
-    chat.add_argument("--no-cache", action="store_true", help="disable Anthropic prompt caching")
+    chat.add_argument("--model", help="Claude model id")
+    chat.add_argument("--no-cache", action="store_true", help="disable prompt caching hints")
     chat.add_argument("--once", action="store_true", help="run a single non-interactive turn")
     chat.add_argument("--dry-run", action="store_true", help="validate chat setup without an API call")
 

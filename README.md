@@ -131,13 +131,13 @@ uv run --extra dev pytest -v
    `[runtime] max_workers` (default 1; serial-by-default), `max_retries`
    (critic and integration retry cap), and the `[budgets]` section.
 
-5. **Start Opus-driven chat for supervised work.** Set
-   `ANTHROPIC_API_KEY`, then run `orch chat "your request"` from the target
-   repo. Opus will call the existing `orch plan`, `orch decompose`,
+5. **Start Opus-driven chat for supervised work.** Run `claude login`, or
+   set `ANTHROPIC_API_KEY`, then run `orch chat "your request"` from the
+   target repo. Opus will call the existing `orch plan`, `orch decompose`,
    `orch dispatch`, `orch diff`, `orch rework`, and `orch merge` primitives
    as tools while you type follow-ups at `you> `. Use `orch chat --once`
    for one-shot scripting and `orch chat --once --dry-run "say hi"` to
-   inspect setup without an API key.
+   inspect setup without credentials.
 
 ---
 
