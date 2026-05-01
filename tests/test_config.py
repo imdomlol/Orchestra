@@ -23,6 +23,8 @@ def test_loads_default_config() -> None:
     assert config.sandbox.build_context == "."
     assert config.budgets.max_tasks_per_request == 5
     assert config.budgets.max_wall_clock_minutes == 60
+    assert config.critic.mode == "opus"
+    assert config.chat.model == "claude-opus-4-7"
     assert ".git/**" in config.policies.forbidden_globs
 
 
@@ -43,4 +45,15 @@ def test_rejects_missing_policies(tmp_path: Path) -> None:
     (config_dir / "policies.toml").unlink()
 
     with pytest.raises(FileNotFoundError, match="policies.toml"):
+        load_config(config_dir)
+
+
+def test_rejects_invalid_critic_mode(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    shutil.copytree(".orch/config", config_dir)
+    orchestrator_path = config_dir / "orchestrator.toml"
+    text = orchestrator_path.read_text(encoding="utf-8")
+    orchestrator_path.write_text(text.replace('mode = "opus"', 'mode = "nope"'))
+
+    with pytest.raises(ValueError, match="critic.mode"):
         load_config(config_dir)

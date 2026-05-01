@@ -28,13 +28,48 @@ plan with concrete task YAML blocks.
 
 ## Outputs
 
-- One Markdown plan under `.orch/plans/`.
+- One Markdown plan artifact path under `.orch/plans/`.
 - Embedded task YAML blocks that match `.orch/schemas/task.schema.json`.
+- Because this wrapper cannot edit files directly, include the complete
+  Markdown plan in the handoff as `plan_content`, or include schema-valid task
+  objects in `tasks` so the wrapper can materialize the plan file.
 
 ## Handoff Format
 
-Return the plan path, risk list, task count, and any assumptions that need
-orchestrator confirmation.
+Return a single JSON object prefixed with `ORCH_HANDOFF:`. The object must
+include:
+
+- `action`: `"planned"`
+- `plan_path`: a repo-relative path like `.orch/plans/P-YYYYMMDDTHHMMSSZ-short-slug.md`
+- `plan_content`: the complete Markdown plan, including fenced `yaml` task
+  blocks, unless you provide `tasks`
+- `task_count`: the number of tasks
+- `risks`: a list of risk strings
+- `assumptions`: a list of assumption strings
+
+Each task YAML block must be a mapping, not a list item, and must use the
+committed schema fields. Minimal example:
+
+```yaml
+id: T-0001-add-hello-world
+objective: Add a hello_world function to orch/cli.py.
+owned_files:
+  - orch/cli.py
+forbidden_files: []
+allowed_commands:
+  - python -m pytest tests/test_cli.py -q
+acceptance_criteria:
+  - id: AC-01
+    kind: command
+    check: python -m pytest tests/test_cli.py -q
+dependencies: []
+branch: task/T-0001-add-hello-world
+worktree_path: .orch/worktrees/T-0001-add-hello-world
+status: pending
+risks: []
+result_artifacts: []
+review_notes: []
+```
 
 ## Escalation
 

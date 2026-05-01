@@ -223,6 +223,30 @@ orch run
 Stop the continuous loop with `Ctrl-C` or SIGTERM. The runtime logs a clean
 shutdown and removes `.orch/locks/orchestrator.pid`.
 
+## 8a. Opus-driven mode (`orch chat`)
+
+For human-supervised work, prefer the terminal chat driver. It uses the
+Anthropic Python SDK directly, so set an API key in the shell where you run it:
+
+```bash
+export ANTHROPIC_API_KEY=...
+orch chat "Add a function add(a, b) to calc.py with a pytest unit test."
+```
+
+Opus will decide when to call `orch plan`, write task YAML through
+`orch decompose`, run workers with `orch dispatch`, inspect patches with
+`orch diff`, and then choose `orch rework` or `orch merge`. Use follow-up
+messages at the `you> ` prompt, `/model <id>` to switch models, `/save` to
+print the transcript path, and `/quit` to leave. For scripts and smoke tests:
+
+```bash
+orch chat --once "say hi"
+orch chat --once --dry-run "say hi"
+```
+
+The dry-run form is the only mode that does not require `ANTHROPIC_API_KEY`.
+Transcripts live under `.orch/logs/chat/`.
+
 ## 9. Inspect Successful Artifacts
 
 After a successful run, inspect:

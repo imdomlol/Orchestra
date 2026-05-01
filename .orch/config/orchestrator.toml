@@ -27,3 +27,9 @@ workdir = "/workspace"
 [budgets]
 max_tasks_per_request = 5
 max_wall_clock_minutes = 60
+
+[critic]
+mode = "opus"
+
+[chat]
+model = "claude-opus-4-7"

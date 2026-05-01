@@ -13,7 +13,7 @@ This README is the user guide. For architecture and the task roadmap, see
 
 ## Status at a glance
 
-- Substrate complete: T-0001 through T-0023 (87 passing tests).
+- Substrate complete: T-0001 through T-0029.
 - The full local pipeline — request → plan ingest → worker dispatch →
   critic handoff → merge — is wired and tested with mocked subprocesses.
 - `orch run` now continuously invokes the planner, worker, critic, and
@@ -130,6 +130,14 @@ uv run --extra dev pytest -v
    The defaults are sensible for local use. Pay attention to
    `[runtime] max_workers` (default 1; serial-by-default), `max_retries`
    (critic and integration retry cap), and the `[budgets]` section.
+
+5. **Start Opus-driven chat for supervised work.** Set
+   `ANTHROPIC_API_KEY`, then run `orch chat "your request"` from the target
+   repo. Opus will call the existing `orch plan`, `orch decompose`,
+   `orch dispatch`, `orch diff`, `orch rework`, and `orch merge` primitives
+   as tools while you type follow-ups at `you> `. Use `orch chat --once`
+   for one-shot scripting and `orch chat --once --dry-run "say hi"` to
+   inspect setup without an API key.
 
 ---
 

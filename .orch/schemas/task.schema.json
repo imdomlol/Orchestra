@@ -39,6 +39,10 @@
       "uniqueItems": true,
       "default": []
     },
+    "critic_override": {
+      "type": "string",
+      "enum": ["gemini", "both"]
+    },
     "owned_files": {
       "type": "array",
       "minItems": 1,

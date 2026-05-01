@@ -5,8 +5,8 @@ single source of truth for the project's design and scope. Other models and
 contributors should read it end-to-end before proposing changes, and update
 it in the same PR as any design-affecting change.
 
-**Status:** design complete; substrate tasks T-0001…T-0023 implemented and
-tested (87 passing tests). T-0018 planner auto-invocation is now wired:
+**Status:** design complete; substrate tasks T-0001…T-0029 implemented and
+tested. T-0018 planner auto-invocation is now wired:
 `submit_request` invokes the planner wrapper, consumes its `planned`
 handoff, and ingests validated pending tasks without manual wrapper
 execution. T-0019 agent-driver invocation is also wired: `run_once`
@@ -16,11 +16,11 @@ successful handoff. T-0020 continuous `orch run` is wired: the runtime
 polls for actionable work, sleeps on idle using the configured interval,
 and shuts down cleanly on SIGINT/SIGTERM. T-0021 budget enforcement is
 now wired for plan task-count caps and continuous-run wall-clock caps. The
-full local pipeline — request submission, plan ingestion, worker
-dispatch, worker→critic handoff, and critic verdict routing through
-`MergeDriver`, rework, escalation, or abandonment — is in place and
-exercised by the unit suite. T-0023 first-drive documentation is available
-at `docs/RUNBOOK.md`.
+full local pipeline — request submission, plan ingestion, worker dispatch,
+default Opus self-review, optional worker→Gemini critic handoff, and critic
+verdict routing through `MergeDriver`, rework, escalation, or abandonment —
+is in place and exercised by the unit suite. T-0023 first-drive documentation
+is available at `docs/RUNBOOK.md`.
 
 ---
 
@@ -50,7 +50,7 @@ multiple specialized models coordinated locally.
 |---|---|---|
 | Orchestrator | Claude Opus | Claude Code subagent; never edits source |
 | Planner | Gemini | CLI subprocess |
-| Critic | Gemini | CLI subprocess (separate invocation) |
+| Critic | Gemini | CLI subprocess (opt-in / big-refactor invocation) |
 | Worker | Codex GPT-5.5 | CLI subprocess inside a worktree |
 | Integration reviewer | Codex GPT-5.5 | CLI subprocess against temp worktree |
 
@@ -106,6 +106,8 @@ fields and constraints:
 - `allowed_commands`: exact command strings the worker may run
 - `acceptance_criteria[]`: each `{id, check, kind: command|file_exists|manual}`
 - `dependencies[]`: other task ids that must be `merged` first
+- `critic_override`: optional `gemini | both` task-level opt-in over
+  `[critic] mode`
 - `branch`: `^task/T-[0-9]{4}`
 - `worktree_path`: under `.orch/worktrees/`
 - `status`: one of `pending | planned | in_progress | self_review |
@@ -127,10 +129,20 @@ escalation. Hard rules:
 - **Claude orchestrator** never edits source. Writes only under `.orch/`.
   Owns scheduling, merges, escalation. Delegates by passing only
   `{task_id, task_yaml_path, worktree_path, role}` — no inline guidance.
+  `orch chat` is the recommended human-driven entry point: it lets Opus
+  drive the explicit plan/decompose/dispatch/diff/rework/merge primitives
+  from a plain terminal. `orch run` remains the unattended event-loop mode.
 - **Gemini planner** produces a single `plans/P-XXXX.md` with embedded task
   YAML blocks. Never writes into `.orch/tasks/` directly.
-- **Gemini critic** reviews diffs against ACs and policies; never runs code.
-  Auto-rejects diffs >800 added lines or >12 files (recommend split).
+- **Gemini critic** is now opt-in for big refactors or unusual risk. When
+  invoked, it reviews diffs against ACs and policies; never runs code.
+  Auto-rejects diffs >800 added lines or >12 files (recommend split). The
+  default quality-check loop is external Opus inspection of exported diffs,
+  followed by explicit `orch merge`, `orch rework`, or abandonment. Global
+  critic routing is configured by `[critic] mode = "opus" | "gemini" |
+  "both"` in `orchestrator.toml`; the default is `"opus"`. Individual task
+  YAML may opt into Gemini with `critic_override: "gemini"` or request a
+  non-final second opinion with `critic_override: "both"`.
 - **Codex worker** edits only inside its worktree, only paths matching
   `owned_files`, runs only `allowed_commands`. Never `--no-verify`, never
   installs deps unless authorized. Rejects flawed plans by setting
@@ -406,7 +418,8 @@ test drive.
 
 16. **T-0016 worker-critic-handoff**
     - Objective: Route completed worker branches into critic review using
-      durable diff artifacts and inbox handoff messages.
+      durable diff artifacts and inbox handoff messages when Gemini critic
+      routing is enabled.
     - Owned files: `orch/review.py`, `orch/runtime.py`,
       `tests/test_review.py`, `tests/test_runtime.py`, `README.md`,
       `docs/PLAN.md`.
@@ -415,12 +428,134 @@ test drive.
         `action: "worker_completed"` and `task_id`.
       - Review dispatch exports `main..task/<id>` to
         `.orch/patches/<id>.diff`.
-      - Task status transitions to `critic_review`.
+      - Task status transitions to `critic_review` for Gemini-final review.
+        The default T-0028 route keeps completed work in `self_review`.
       - Critic inbox messages include only artifact paths and role metadata.
       - Malformed worker completion messages remain unacknowledged by failing
         before ack.
 
-**Required external pieces (out of scope of T-0001…T-0017):**
+24. **T-0024 plan-only-cli**
+    - Objective: Add `orch plan "<request>"` as a preview path that invokes
+      the Gemini planner through `ModelWrapper`, writes the request artifact,
+      and prints the produced Markdown plan path without entering the
+      autonomous task-ingest flow.
+    - Owned files: `orch/cli.py`, `orch/runtime.py`, `tests/test_cli.py`,
+      `tests/test_runtime.py`, `docs/PLAN.md`.
+    - Acceptance:
+      - `OrchestraRuntime.plan_only(request: str) -> Path` writes the
+        request under `.orch/requests/`, invokes `gemini-planner`, and
+        returns the resolved `.orch/plans/` Markdown path.
+      - `orch plan "add foo"` exits 0 and prints only the plan path.
+      - The plan-only path does not leave a `planned` inbox message and
+      does not extract or write task YAMLs.
+      - Planner failures raise `PlanOnlyError`; stderr remains under
+        `.orch/logs/planner/`.
+
+25. **T-0025 decompose-cli**
+    - Objective: Add an explicit `orch decompose` ingestion path for task
+      YAML authored outside the Gemini Markdown plan flow.
+    - Owned files: `orch/cli.py`, `orch/runtime.py`, `tests/test_cli.py`,
+      `tests/test_runtime.py`, `docs/PLAN.md`.
+    - Acceptance:
+      - `orch decompose` reads one task YAML document from stdin,
+        schema-validates it, writes it through `TaskStore` to
+        `.orch/tasks/pending/<id>.yaml`, and prints the path.
+      - `ingest_task_yaml(yaml_text: str) -> Path` exposes the same behavior
+        for programmatic callers.
+      - Malformed YAML, schema-invalid YAML, and duplicate task ids fail
+        without writing or overwriting pending task files.
+      - The existing autonomous `planned` message to `PlanIngestor` path
+        remains intact.
+
+26. **T-0026 synchronous-dispatch-cli**
+    - Objective: Add `orch dispatch <task_id>` so an external Opus agent can
+      synchronously dispatch one named pending task, create its worker
+      worktree, and run the `codex-worker` wrapper without waiting for the
+      inbox-driven runtime loop.
+    - Owned files: `orch/cli.py`, `orch/runtime.py`, `tests/test_cli.py`,
+      `tests/test_runtime.py`, `docs/PLAN.md`.
+    - Acceptance:
+      - `orch dispatch T-0001` looks up `.orch/tasks/pending/T-0001.yaml`,
+        creates the worktree with ownership hooks, moves the YAML to
+        `active/`, invokes `codex-worker` through `ModelWrapper`, and blocks
+        until the wrapper returns.
+      - On worker success, the task remains in `active/` with
+        `status: self_review`, leaving the branch diff exportable by later
+        patch/diff primitives.
+      - Owned-file collisions with active tasks exit non-zero with a clear
+        message, leave the pending YAML in place, and do not create a
+        worktree.
+      - Wrapper failure appends a `claude-orchestrator` review note, leaves
+        the task in `active/`, and exits non-zero.
+      - The existing autonomous `dispatch_next()` and worker inbox driver
+        behavior remains unchanged.
+
+27. **T-0027 manual-review-primitives**
+    - Objective: Add explicit `orch diff`, `orch rework`, and `orch merge`
+      commands so an external Opus agent can inspect patches and choose the
+      next step without Gemini critic routing in the default loop.
+    - Owned files: `orch/cli.py`, `orch/runtime.py`, `orch/review.py`,
+      `tests/test_cli.py`, `tests/test_runtime.py`, `tests/test_review.py`,
+      `docs/PLAN.md`.
+    - Acceptance:
+      - `orch diff <task_id>` exports `main..task/<id>` to
+        `.orch/patches/<id>.diff` if missing, then prints the diff contents.
+      - `orch rework <task_id> --notes "<text>"` appends a
+        `claude-orchestrator` `request_changes` review note, transitions the
+        task to `in_progress`, and synchronously reruns the codex worker using
+        the T-0026 dispatch path.
+      - `orch merge <task_id>` transitions to `integration_review` and calls
+        `MergeDriver.merge_task`; integration failure leaves the task in
+        `integration_review` with a `claude-orchestrator` failure note and
+        exits non-zero.
+      - These manual primitives do not enforce `max_retries`; Opus decides
+        whether to rework, merge, or abandon.
+      - The inbox-driven `critic_reviewed` routing remains intact for opt-in
+        Gemini critic runs.
+
+28. **T-0028 critic-mode-gating**
+    - Objective: Gate Gemini critic invocation behind a global config mode
+      and per-task opt-in so Opus is the default final reviewer after worker
+      completion.
+    - Owned files: `.orch/config/orchestrator.toml`,
+      `.orch/schemas/task.schema.json`, `orch/config.py`, `orch/runtime.py`,
+      `orch/review.py`, `tests/test_config.py`, `tests/test_runtime.py`,
+      `tests/test_review.py`, `docs/PLAN.md`.
+    - Acceptance:
+      - `[critic] mode = "opus" | "gemini" | "both"` loads from
+        `orchestrator.toml`, defaulting to `"opus"`.
+      - Task YAML can set optional `critic_override: "gemini" | "both"`.
+      - In `"opus"` mode, `worker_completed` leaves the task in
+        `self_review` with no Gemini critic inbox message.
+      - In `"gemini"` mode, `worker_completed` follows the existing Gemini
+        critic flow through `critic_review`.
+      - In `"both"` mode, the Gemini critic is invoked as a second opinion
+        while the task remains in `self_review`; Opus's manual verdict is
+        final.
+      - Unit tests cover all three modes with mocked wrappers, including the
+        default zero-Gemini path and per-task opt-in over the global default.
+
+29. **T-0029 opus-chat-cli**
+    - Objective: Add `orch chat` as a terminal-native interactive
+      orchestrator where Claude Opus drives the explicit orchestration
+      primitives through Anthropic SDK tool use.
+    - Owned files: `orch/chat.py`, `orch/cli.py`, `orch/config.py`,
+      `.orch/config/orchestrator.toml`, `pyproject.toml`,
+      `tests/test_chat.py`, `tests/test_cli.py`, `README.md`,
+      `docs/RUNBOOK.md`, `docs/PLAN.md`.
+    - Acceptance:
+      - `orch chat "<request>"` and bare `orch chat` start a shell session
+        with `/quit`, `/save`, and `/model <id>` slash commands.
+      - `--once` runs one non-interactive turn, and `--dry-run` is the only
+        no-key path; otherwise `ANTHROPIC_API_KEY` is required.
+      - Opus receives cached system/tool blocks and tools for plan,
+        decompose, dispatch, diff, rework, merge, task listing, read-only
+        file reads, and allowlisted read-only shell commands.
+      - Tool calls shell out through existing CLI primitives where those
+        primitives exist; non-zero exits are returned to the model.
+      - Session transcripts are written under `.orch/logs/chat/`.
+
+**Required external pieces (out of scope of T-0001…T-0029):**
 - None for the local MVP substrate; real model CLI credentials and provider
   availability are environment-specific runtime concerns.
 

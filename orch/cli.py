@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import re
 import shlex
@@ -26,6 +27,78 @@ def main(argv: list[str] | None = None) -> int:
             result = runtime.submit(args.prompt)
             print(result.request_path)
             return 0
+        if args.command == "plan":
+            OrchestraRuntime, result_to_dict = _runtime_api()
+            runtime = OrchestraRuntime.from_config(root=args.root)
+            print(runtime.plan_only(args.request))
+            return 0
+        if args.command == "decompose":
+            from orch.runtime import ingest_task_yaml
+
+            print(ingest_task_yaml(sys.stdin.read(), root=args.root))
+            return 0
+        if args.command == "dispatch":
+            OrchestraRuntime, result_to_dict = _runtime_api()
+            runtime = OrchestraRuntime.from_config(
+                root=args.root,
+                on_progress=_print_progress,
+                model_stderr_sink=_model_stderr_sink,
+            )
+            result = runtime.dispatch_task(args.task_id)
+            print(result.task_path)
+            return 0
+        if args.command == "diff":
+            OrchestraRuntime, result_to_dict = _runtime_api()
+            runtime = OrchestraRuntime.from_config(root=args.root)
+            result = runtime.export_diff(args.task_id)
+            print(result.contents, end="")
+            return 0
+        if args.command == "rework":
+            OrchestraRuntime, result_to_dict = _runtime_api()
+            runtime = OrchestraRuntime.from_config(
+                root=args.root,
+                on_progress=_print_progress,
+                model_stderr_sink=_model_stderr_sink,
+            )
+            result = runtime.rework_task(args.task_id, args.notes)
+            print(result.task_path)
+            return 0
+        if args.command == "merge":
+            OrchestraRuntime, result_to_dict = _runtime_api()
+            runtime = OrchestraRuntime.from_config(
+                root=args.root,
+                on_progress=_print_progress,
+                model_stderr_sink=_model_stderr_sink,
+            )
+            result = runtime.merge_task(args.task_id)
+            if result.merged:
+                print(result.merge_result.message)
+                return 0
+            print(result.merge_result.message or result.merge_result.status, file=sys.stderr)
+            return 1
+        if args.command == "list-tasks":
+            from orch.task_store import TaskStore
+
+            store = TaskStore(args.root)
+            states = ["pending", "active", "done"] if args.status == "all" else [args.status]
+            payload = {
+                state: [str(path.relative_to(args.root)) for path in store.list_tasks(state)]
+                for state in states
+            }
+            print(json.dumps(payload, indent=2))
+            return 0
+        if args.command == "chat":
+            from orch.chat import run_chat
+
+            request = " ".join(args.request) if args.request else None
+            return run_chat(
+                root=args.root,
+                request=request,
+                model=args.model,
+                no_cache=args.no_cache,
+                once=args.once,
+                dry_run=args.dry_run,
+            )
         if args.command == "run":
             OrchestraRuntime, result_to_dict = _runtime_api()
             runtime = OrchestraRuntime.from_config(
@@ -93,6 +166,56 @@ def _build_parser() -> argparse.ArgumentParser:
 
     submit = subparsers.add_parser("submit", help="record a request")
     submit.add_argument("prompt")
+
+    plan = subparsers.add_parser(
+        "plan",
+        help="produce a plan without ingesting tasks",
+    )
+    plan.add_argument("request")
+
+    subparsers.add_parser(
+        "decompose",
+        help="validate task YAML from stdin and write it to pending tasks",
+    )
+
+    dispatch = subparsers.add_parser(
+        "dispatch",
+        help="dispatch one pending task and run its worker synchronously",
+    )
+    dispatch.add_argument("task_id")
+
+    diff = subparsers.add_parser(
+        "diff",
+        help="export and print the main..task/<id> diff for a task",
+    )
+    diff.add_argument("task_id")
+
+    rework = subparsers.add_parser(
+        "rework",
+        help="record manual review notes and rerun the worker synchronously",
+    )
+    rework.add_argument("task_id")
+    rework.add_argument("--notes", required=True, help="review notes for the worker")
+
+    merge = subparsers.add_parser(
+        "merge",
+        help="merge one reviewed task through integration review",
+    )
+    merge.add_argument("task_id")
+
+    list_tasks = subparsers.add_parser("list-tasks", help="list task YAML paths by status")
+    list_tasks.add_argument(
+        "--status",
+        choices=("pending", "active", "done", "all"),
+        default="all",
+    )
+
+    chat = subparsers.add_parser("chat", help="run an interactive Opus-driven orchestrator")
+    chat.add_argument("request", nargs="*", help="initial request; stdin is used with --once if omitted")
+    chat.add_argument("--model", help="Anthropic model id")
+    chat.add_argument("--no-cache", action="store_true", help="disable Anthropic prompt caching")
+    chat.add_argument("--once", action="store_true", help="run a single non-interactive turn")
+    chat.add_argument("--dry-run", action="store_true", help="validate chat setup without an API call")
 
     run = subparsers.add_parser("run", help="run the orchestrator loop")
     run.add_argument("--once", action="store_true", help="process one event")

@@ -12,13 +12,26 @@ import time
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
-from orch.config import BudgetConfig, OrchestraConfig, RuntimeConfig, load_config
+import yaml
+
+from orch.config import (
+    BudgetConfig,
+    CriticConfig,
+    OrchestraConfig,
+    RuntimeConfig,
+    load_config,
+)
 from orch.dispatcher import DispatchResult, Dispatcher
 from orch.inbox import Inbox, InboxMessage
 from orch.merge import MergeDriver, MergeResult
 from orch.model_wrapper import ModelWrapper, WrapperResult
 from orch.plans import PlanBudgetExceeded, PlanIngestResult, PlanIngestor
-from orch.review import CriticDispatchResult, ReviewDispatcher
+from orch.review import (
+    CriticDispatchResult,
+    DiffExportResult,
+    ReviewDispatcher,
+    resolve_critic_mode,
+)
 from orch.task_store import ReviewNote, TaskStore
 
 
@@ -26,10 +39,104 @@ class RoleRunner(Protocol):
     def run_role(self, role: str, **context: Any) -> WrapperResult: ...
 
 
+def ingest_task_yaml(
+    yaml_text: str,
+    *,
+    root: Path = Path("."),
+    task_store: TaskStore | None = None,
+) -> Path:
+    try:
+        task = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"malformed task YAML: {exc}") from exc
+    if not isinstance(task, dict):
+        raise ValueError("task YAML must contain a mapping")
+
+    task_id = task.get("id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise ValueError("task YAML must include a string id")
+
+    store = task_store or TaskStore(root.resolve())
+    try:
+        store.path_for(task_id)
+    except FileNotFoundError:
+        pass
+    else:
+        raise FileExistsError(f"task already exists: {task_id}")
+    return store.write_pending(task)
+
+
 @dataclass(frozen=True)
 class SubmitResult:
     request_path: Path
     message_path: Path
+
+
+class PlanOnlyError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        result: WrapperResult,
+    ) -> None:
+        super().__init__(message)
+        self.result = result
+        self.stderr_path = result.process.stderr_path
+        self.returncode = result.process.returncode
+
+
+class _PlanOnlyHandoffStore:
+    def __init__(self, root: Path, log_name: str) -> None:
+        self.root = root
+        self.log_name = log_name
+
+    def post(self, role: str, body: dict[str, Any]) -> Path:
+        log_dir = self.root / ".orch" / "logs" / "planner"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / f"{self.log_name}.handoff.json"
+        temp_path = path.with_suffix(".handoff.json.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(body, indent=2, sort_keys=True))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        try:
+            fd = os.open(log_dir, os.O_RDONLY)
+        except OSError:
+            return path
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return path
+
+
+class _SyncWorkerHandoffStore:
+    def __init__(self, root: Path, task_id: str) -> None:
+        self.root = root
+        self.task_id = task_id
+
+    def post(self, role: str, body: dict[str, Any]) -> Path:
+        log_dir = self.root / ".orch" / "logs" / "workers" / self.task_id
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / "sync-handoff.json"
+        temp_path = path.with_suffix(".json.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(body, indent=2, sort_keys=True))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        try:
+            fd = os.open(log_dir, os.O_RDONLY)
+        except OSError:
+            return path
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return path
 
 
 @dataclass(frozen=True)
@@ -61,6 +168,24 @@ class RunLoopResult:
     last_result: RunOnceResult | None = None
 
 
+@dataclass(frozen=True)
+class SyncDispatchResult:
+    task_id: str
+    task_path: Path
+    worktree_path: Path
+    worker_result: WrapperResult
+
+
+@dataclass(frozen=True)
+class ManualMergeResult:
+    task_id: str
+    merge_result: MergeResult
+
+    @property
+    def merged(self) -> bool:
+        return self.merge_result.merged
+
+
 class OrchestraRuntime:
     """Small deterministic runtime loop over inbox and dispatch state."""
 
@@ -70,6 +195,7 @@ class OrchestraRuntime:
         root: Path = Path("."),
         runtime_config: RuntimeConfig,
         budget_config: BudgetConfig | None = None,
+        critic_config: CriticConfig | None = None,
         task_store: TaskStore | None = None,
         inbox: Inbox | None = None,
         dispatcher: Dispatcher | None = None,
@@ -87,6 +213,7 @@ class OrchestraRuntime:
             max_tasks_per_request=5,
             max_wall_clock_minutes=60,
         )
+        self.critic_config = critic_config or CriticConfig()
         self.task_store = task_store or TaskStore(self.root)
         self.inbox = inbox or Inbox(self.root)
         self.dispatcher = dispatcher or Dispatcher(
@@ -139,6 +266,7 @@ class OrchestraRuntime:
             root=resolved_root,
             runtime_config=loaded.runtime,
             budget_config=loaded.budgets,
+            critic_config=loaded.critic,
             merge_driver=merge_driver,
             on_progress=on_progress,
             on_confirm=on_confirm,
@@ -159,6 +287,180 @@ class OrchestraRuntime:
             },
         )
         return SubmitResult(request_path=request_path, message_path=message_path)
+
+    def plan_only(self, request: str) -> Path:
+        if not request.strip():
+            raise ValueError("request must not be empty")
+
+        request_path = self._write_request(request)
+        relative_request = str(request_path.relative_to(self.root))
+        log_name = request_path.stem
+        wrapper = self.model_wrapper or ModelWrapper(
+            root=self.root,
+            inbox=_PlanOnlyHandoffStore(self.root, log_name),
+            stderr_sink=self._model_stderr_sink,
+        )
+        result = wrapper.run_role(
+            "gemini-planner",
+            request_path=relative_request,
+            log_name=log_name,
+            inbox_role="plan-only",
+        )
+        self._discard_handoff_message(result.handoff_path)
+        if not result.process.succeeded:
+            raise PlanOnlyError("planner exited unsuccessfully", result=result)
+        if result.handoff is None:
+            raise PlanOnlyError(
+                "planner did not emit an Orchestra handoff",
+                result=result,
+            )
+
+        plan_path = result.handoff.get("plan_path")
+        if not isinstance(plan_path, str) or not plan_path.strip():
+            raise PlanOnlyError(
+                "planner handoff did not include plan_path",
+                result=result,
+            )
+        self._materialize_planned_content(
+            InboxMessage(
+                role="plan-only",
+                path=result.handoff_path or Path(),
+                body=result.handoff,
+            ),
+            plan_path,
+        )
+        resolved_plan = self._resolve_plan_path(plan_path)
+        if not resolved_plan.exists():
+            raise PlanOnlyError(
+                "planner handoff referenced a missing plan file",
+                result=result,
+            )
+        return resolved_plan
+
+    def dispatch_task(self, task_id: str) -> SyncDispatchResult:
+        pending_path = self.task_store.tasks_root / "pending" / f"{task_id}.yaml"
+        with self.task_store.pickup_lock(task_id):
+            if not pending_path.exists():
+                raise FileNotFoundError(f"pending task not found: {task_id}")
+
+            task = self.task_store.read_path(pending_path)
+            if not self.dispatcher._dependencies_merged(task):
+                raise RuntimeError(f"{task_id} has unmerged dependencies")
+            if self.dispatcher._collides_with_active(
+                task, self.dispatcher._active_tasks()
+            ):
+                raise RuntimeError(f"{task_id} owned_files collide with an active task")
+
+            info = self.dispatcher.worktrees.create(
+                task_id,
+                self.dispatcher.base_ref,
+                owned_files=task.get("owned_files", []),
+                forbidden_files=task.get("forbidden_files", []),
+            )
+            active_path = self.task_store.transition(task_id, "active", "in_progress")
+
+        result = self._run_worker_sync(task_id, active_path, info.path)
+        return SyncDispatchResult(
+            task_id=task_id,
+            task_path=active_path,
+            worktree_path=info.path,
+            worker_result=result,
+        )
+
+    def export_diff(self, task_id: str) -> DiffExportResult:
+        return self.review_dispatcher.export_diff(task_id)
+
+    def rework_task(self, task_id: str, notes: str) -> SyncDispatchResult:
+        if not notes.strip():
+            raise ValueError("notes must not be empty")
+        self.task_store.append_review_note(
+            task_id,
+            ReviewNote(
+                author="claude-orchestrator",
+                verdict="request_changes",
+                body=notes,
+            ),
+        )
+        active_path = self.task_store.transition(task_id, "active", "in_progress")
+        task = self.task_store.read(task_id)
+        worktree_path = (self.root / task["worktree_path"]).resolve()
+        result = self._run_worker_sync(task_id, active_path, worktree_path)
+        return SyncDispatchResult(
+            task_id=task_id,
+            task_path=active_path,
+            worktree_path=worktree_path,
+            worker_result=result,
+        )
+
+    def merge_task(self, task_id: str) -> ManualMergeResult:
+        self.task_store.transition(task_id, "active", "integration_review")
+        self._progress(f"Merging {task_id}...")
+        try:
+            merge = self.merge_driver.merge_task(task_id)
+        except Exception as exc:
+            self.task_store.append_review_note(
+                task_id,
+                ReviewNote(
+                    author="claude-orchestrator",
+                    verdict="request_changes",
+                    body=f"Integration failed: {exc}",
+                ),
+            )
+            raise
+        if not merge.merged:
+            self.task_store.append_review_note(
+                task_id,
+                ReviewNote(
+                    author="claude-orchestrator",
+                    verdict="request_changes",
+                    body=f"Integration failed: {merge.status}: {merge.message}",
+                ),
+            )
+        return ManualMergeResult(task_id=task_id, merge_result=merge)
+
+    def _run_worker_sync(
+        self,
+        task_id: str,
+        task_path: Path,
+        worktree_path: Path,
+    ) -> WrapperResult:
+        task_yaml_path = str(task_path.relative_to(self.root))
+        relative_worktree = str(worktree_path.relative_to(self.root))
+        wrapper = self.model_wrapper or ModelWrapper(
+            root=self.root,
+            inbox=_SyncWorkerHandoffStore(self.root, task_id),
+            stderr_sink=self._model_stderr_sink,
+        )
+        self._progress(f"Calling codex-worker on {task_id}...")
+        result = wrapper.run_role(
+            "codex-worker",
+            log_name=task_id,
+            inbox_role="orchestrator",
+            task_id=task_id,
+            task_yaml_path=task_yaml_path,
+            worktree_path=relative_worktree,
+        )
+        self._progress(f"codex-worker returned (exit {result.process.returncode})")
+        if not result.succeeded:
+            reason = (
+                f"codex-worker exited with {result.process.returncode}"
+                if not result.process.succeeded
+                else "codex-worker did not emit an Orchestra handoff"
+            )
+            self.task_store.append_review_note(
+                task_id,
+                ReviewNote(
+                    author="claude-orchestrator",
+                    verdict="request_changes",
+                    body=reason,
+                ),
+            )
+            raise RuntimeError(f"{task_id} dispatch failed: {reason}")
+
+        task_after_worker = self.task_store.read(task_id)
+        if task_after_worker.get("status") == "in_progress":
+            self.task_store.transition(task_id, "active", "self_review")
+        return result
 
     def startup_reconcile(self) -> ReconcileResult:
         cleared = self._clear_stale_pid()
@@ -303,14 +605,7 @@ class OrchestraRuntime:
             task_id = message.body.get("task_id")
             if not isinstance(task_id, str) or not task_id.strip():
                 raise ValueError("worker_completed message must include task_id")
-            critic = self.review_dispatcher.dispatch_to_critic(task_id)
-            self.inbox.ack(message)
-            return RunOnceResult(
-                kind="critic_dispatched",
-                message=f"sent {task_id} to critic review",
-                critic_dispatch=critic,
-                inbox_message=message,
-            )
+            return self._handle_worker_completed(message, task_id)
         if action == "critic_reviewed":
             return self._handle_critic_reviewed(message)
 
@@ -318,6 +613,42 @@ class OrchestraRuntime:
         return RunOnceResult(
             kind="ignored_message",
             message=f"ignored unsupported action: {action!r}",
+            inbox_message=message,
+        )
+
+    def _handle_worker_completed(
+        self,
+        message: InboxMessage,
+        task_id: str,
+    ) -> RunOnceResult:
+        task = self.task_store.read(task_id)
+        mode = resolve_critic_mode(task, self.critic_config.mode)
+
+        if mode == "opus":
+            self.task_store.transition(task_id, "active", "self_review")
+            self.inbox.ack(message)
+            return RunOnceResult(
+                kind="self_review",
+                message=f"{task_id} awaiting Opus review",
+                inbox_message=message,
+            )
+
+        if mode == "both":
+            critic = self.review_dispatcher.dispatch_to_critic_for_opus(task_id)
+            self.inbox.ack(message)
+            return RunOnceResult(
+                kind="critic_dispatched",
+                message=f"sent {task_id} to Gemini critic; awaiting Opus review",
+                critic_dispatch=critic,
+                inbox_message=message,
+            )
+
+        critic = self.review_dispatcher.dispatch_to_critic(task_id)
+        self.inbox.ack(message)
+        return RunOnceResult(
+            kind="critic_dispatched",
+            message=f"sent {task_id} to critic review",
+            critic_dispatch=critic,
             inbox_message=message,
         )
 
@@ -535,9 +866,20 @@ class OrchestraRuntime:
 
     def _materialize_planned_content(self, message: InboxMessage, plan_path: str) -> None:
         plan_content = message.body.get("plan_content")
-        if not isinstance(plan_content, str) or not plan_content:
-            return
+        resolved_plan = self._resolve_plan_path(plan_path)
 
+        if resolved_plan.exists():
+            return
+        if isinstance(plan_content, str) and plan_content:
+            resolved_plan.parent.mkdir(parents=True, exist_ok=True)
+            resolved_plan.write_text(plan_content, encoding="utf-8")
+            return
+        raise ValueError(
+            "planner handoff referenced a missing plan file without plan_content: "
+            f"{plan_path}"
+        )
+
+    def _resolve_plan_path(self, plan_path: str) -> Path:
         path = Path(plan_path)
         if path.is_absolute():
             resolved_plan = path.resolve()
@@ -548,10 +890,18 @@ class OrchestraRuntime:
             resolved_plan.relative_to(plans_root)
         except ValueError as exc:
             raise ValueError(f"plan path is outside .orch/plans: {plan_path}") from exc
+        return resolved_plan
 
-        if not resolved_plan.exists():
-            resolved_plan.parent.mkdir(parents=True, exist_ok=True)
-            resolved_plan.write_text(plan_content, encoding="utf-8")
+    def _discard_handoff_message(self, path: Path | None) -> None:
+        if path is None or not path.exists():
+            return
+        inbox_root = (self.root / ".orch" / "inbox").resolve()
+        try:
+            path.resolve().relative_to(inbox_root)
+        except ValueError:
+            return
+        path.unlink()
+        self._fsync_dir(path.parent)
 
     def _record_budget_exceeded(self, budget: str, payload: dict[str, Any]) -> Path:
         return self._append_orchestrator_log(
@@ -581,8 +931,24 @@ class OrchestraRuntime:
                 f"critic_reviewed message must have a valid verdict, got {verdict!r}"
             )
 
-        # Count prior critic request_changes rounds before appending the new note.
         task = self.task_store.read(task_id)
+        mode = resolve_critic_mode(task, self.critic_config.mode)
+        if mode == "both" or (
+            task.get("status") == "self_review" and mode != "gemini"
+        ):
+            self.task_store.append_review_note(
+                task_id,
+                ReviewNote(author="gemini-critic", verdict=verdict, body=note_body),
+            )
+            self.task_store.transition(task_id, "active", "self_review")
+            self.inbox.ack(message)
+            return RunOnceResult(
+                kind="self_review",
+                message=f"recorded Gemini critic verdict for {task_id}; awaiting Opus review",
+                inbox_message=message,
+            )
+
+        # Count prior critic request_changes rounds before appending the new note.
         prior_critic_rounds = sum(
             1
             for note in task.get("review_notes", [])
@@ -801,7 +1167,8 @@ def result_to_dict(result: RunOnceResult) -> dict[str, Any]:
         data["task_id"] = result.dispatch.task_id
         data["task_path"] = str(result.dispatch.task_path)
         data["worktree_path"] = str(result.dispatch.worktree_path)
-        data["message_path"] = str(result.dispatch.message_path)
+        if result.dispatch.message_path is not None:
+            data["message_path"] = str(result.dispatch.message_path)
     if result.critic_dispatch is not None:
         data["task_id"] = result.critic_dispatch.task_id
         data["task_path"] = str(result.critic_dispatch.task_path)

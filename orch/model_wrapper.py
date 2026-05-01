@@ -103,12 +103,14 @@ class ModelWrapper:
             stderr_sink=self.stderr_sink,
         )
 
+        stdout_text = ""
         handoff = None
         handoff_path = None
         if process.stdout_path.exists():
-            handoff = extract_handoff(process.stdout_path.read_text(encoding="utf-8"))
+            stdout_text = process.stdout_path.read_text(encoding="utf-8")
+            handoff = extract_handoff(stdout_text)
         if handoff is not None:
-            handoff = self._prepare_planner_handoff(role, handoff)
+            handoff = self._prepare_planner_handoff(role, handoff, stdout_text)
             handoff.setdefault("role", role)
             handoff_path = self.inbox.post(inbox_role, handoff)
 
@@ -195,7 +197,12 @@ class ModelWrapper:
     def _stringify_paths(self, context: dict[str, Any]) -> dict[str, Any]:
         return {key: str(value) if isinstance(value, Path) else value for key, value in context.items()}
 
-    def _prepare_planner_handoff(self, role: str, handoff: dict[str, Any]) -> dict[str, Any]:
+    def _prepare_planner_handoff(
+        self,
+        role: str,
+        handoff: dict[str, Any],
+        stdout_text: str = "",
+    ) -> dict[str, Any]:
         if not role.endswith("-planner"):
             return handoff
 
@@ -204,6 +211,15 @@ class ModelWrapper:
         tasks = prepared.get("tasks")
         plan_path = prepared.get("plan_path")
         plan_content = prepared.get("plan_content")
+        if (
+            isinstance(plan_path, str)
+            and plan_path.strip()
+            and not isinstance(plan_content, str)
+            and not tasks
+        ):
+            plan_content = _extract_plan_markdown(stdout_text)
+            if plan_content:
+                prepared["plan_content"] = plan_content
         if isinstance(plan_path, str) and plan_path.strip() and isinstance(plan_content, str):
             resolved_plan = self._resolve_plan_artifact(plan_path)
             if resolved_plan is not None and not resolved_plan.exists():
@@ -293,6 +309,37 @@ def extract_handoff(output: str) -> dict[str, Any] | None:
         if data is not None:
             return data
     return None
+
+
+def _extract_plan_markdown(output: str) -> str | None:
+    marker_index = output.rfind("ORCH_HANDOFF:")
+    if marker_index == -1:
+        markdown = output
+    else:
+        remainder = output[marker_index + len("ORCH_HANDOFF:") :]
+        decoder = json.JSONDecoder()
+        markdown = ""
+        for index, char in enumerate(remainder):
+            if char != "{":
+                continue
+            try:
+                _, end = decoder.raw_decode(remainder[index:])
+            except json.JSONDecodeError:
+                continue
+            markdown = remainder[index + end :]
+            break
+
+    markdown = markdown.lstrip()
+    if markdown.startswith("```"):
+        _, separator, remainder = markdown.partition("\n")
+        if separator:
+            markdown = remainder
+        else:
+            markdown = ""
+    markdown = markdown.strip()
+    if markdown:
+        markdown += "\n"
+    return markdown or None
 
 
 def _decode_json_object(candidate: str) -> dict[str, Any] | None:

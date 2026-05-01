@@ -55,6 +55,16 @@ class BudgetConfig:
 
 
 @dataclass(frozen=True)
+class CriticConfig:
+    mode: str = "opus"
+
+
+@dataclass(frozen=True)
+class ChatConfig:
+    model: str = "claude-opus-4-7"
+
+
+@dataclass(frozen=True)
 class PolicyConfig:
     forbidden_globs: tuple[str, ...]
     default_allowed_commands: tuple[str, ...]
@@ -69,6 +79,8 @@ class OrchestraConfig:
     runtime: RuntimeConfig
     sandbox: SandboxConfig
     budgets: BudgetConfig
+    critic: CriticConfig
+    chat: ChatConfig
     policies: PolicyConfig
 
 
@@ -86,8 +98,10 @@ def load_config(config_dir: Path = DEFAULT_CONFIG_DIR) -> OrchestraConfig:
         ),
         cli=CliConfig(
             gemini=_resolve_python_command(_required_str(orchestrator, "cli", "gemini")),
-            codex=_required_str(orchestrator, "cli", "codex"),
-            claude=_section(orchestrator, "cli").get("claude", "claude") or "claude",
+            codex=_resolve_python_command(_required_str(orchestrator, "cli", "codex")),
+            claude=_resolve_python_command(
+                _section(orchestrator, "cli").get("claude", "claude") or "claude"
+            ),
         ),
         runtime=RuntimeConfig(
             max_workers=_required_int(orchestrator, "runtime", "max_workers", minimum=1),
@@ -115,6 +129,18 @@ def load_config(config_dir: Path = DEFAULT_CONFIG_DIR) -> OrchestraConfig:
             max_wall_clock_minutes=_required_int(
                 orchestrator, "budgets", "max_wall_clock_minutes", minimum=1
             ),
+        ),
+        critic=CriticConfig(
+            mode=_optional_choice(
+                orchestrator,
+                "critic",
+                "mode",
+                {"opus", "gemini", "both"},
+                default="opus",
+            )
+        ),
+        chat=ChatConfig(
+            model=_optional_str(orchestrator, "chat", "model", default="claude-opus-4-7")
         ),
         policies=PolicyConfig(
             forbidden_globs=_required_str_tuple(policies, "forbidden_globs"),
@@ -161,6 +187,38 @@ def _required_choice(
         prefix = f"{section}." if section else ""
         allowed = ", ".join(sorted(choices))
         raise ValueError(f"{prefix}{key} must be one of: {allowed}")
+    return value
+
+
+def _optional_choice(
+    data: dict[str, Any],
+    section: str,
+    key: str,
+    choices: set[str],
+    *,
+    default: str,
+) -> str:
+    table = data.get(section, {})
+    if not isinstance(table, dict):
+        raise ValueError(f"{section} must be a TOML table")
+    value = table.get(key, default)
+    prefix = f"{section}."
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{prefix}{key} must be a non-empty string")
+    if value not in choices:
+        allowed = ", ".join(sorted(choices))
+        raise ValueError(f"{prefix}{key} must be one of: {allowed}")
+    return value
+
+
+def _optional_str(data: dict[str, Any], section: str, key: str, *, default: str) -> str:
+    table = data.get(section, {})
+    if not isinstance(table, dict):
+        raise ValueError(f"{section} must be a TOML table")
+    value = table.get(key, default)
+    prefix = f"{section}."
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{prefix}{key} must be a non-empty string")
     return value
 
 

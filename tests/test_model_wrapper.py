@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 import json
 import re
@@ -42,7 +43,8 @@ def fake_cli_command(action: str) -> str:
 
 
 def fake_cli_output(output: str) -> str:
-    script = f"import sys; sys.stdin.read(); print({output!r})"
+    encoded = base64.b64encode(output.encode("utf-8")).decode("ascii")
+    script = f"import base64, sys; sys.stdin.read(); print(base64.b64decode({encoded!r}).decode())"
     return f"{sys.executable} -c {json.dumps(script)}"
 
 
@@ -187,6 +189,34 @@ def test_claude_planner_materializes_plan_content(tmp_path: Path) -> None:
         "plan_path": ".orch/plans/P-0001.md",
         "plan_written": True,
         "role": "claude-planner",
+    }
+    assert (tmp_path / ".orch/plans/P-0001.md").read_text(encoding="utf-8") == plan_content
+
+
+def test_gemini_planner_materializes_markdown_after_handoff(tmp_path: Path) -> None:
+    plan_content = "# Plan\n\n```yaml\n" + json.dumps(load_task("T-0001")) + "\n```\n"
+    output = (
+        "ORCH_HANDOFF:"
+        + json.dumps({"plan_path": ".orch/plans/P-0001.md", "task_count": 1})
+        + "\n"
+        + plan_content
+    )
+    copy_config(tmp_path, gemini=fake_cli_output(output))
+
+    result = ModelWrapper(tmp_path).run_role(
+        "gemini-planner",
+        request_path=".orch/requests/R-0001.md",
+        log_name="P-0001",
+        timeout_seconds=5,
+    )
+
+    assert result.succeeded
+    assert result.handoff == {
+        "action": "planned",
+        "plan_path": ".orch/plans/P-0001.md",
+        "plan_written": True,
+        "role": "gemini-planner",
+        "task_count": 1,
     }
     assert (tmp_path / ".orch/plans/P-0001.md").read_text(encoding="utf-8") == plan_content
 

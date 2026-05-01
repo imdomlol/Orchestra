@@ -7,11 +7,12 @@ import subprocess
 
 import yaml
 
-from orch.config import BudgetConfig, RuntimeConfig
+from orch.config import BudgetConfig, CriticConfig, RuntimeConfig
 from orch.inbox import Inbox
+from orch.merge import MergeResult
 from orch.model_wrapper import WrapperResult
 from orch.runner import ProcessResult
-from orch.runtime import OrchestraRuntime
+from orch.runtime import OrchestraRuntime, PlanOnlyError, ingest_task_yaml
 from orch.task_store import TaskStore
 
 
@@ -59,7 +60,7 @@ def load_task(task_id: str = "T-0001") -> dict:
     return task
 
 
-def runtime(repo: Path) -> OrchestraRuntime:
+def runtime(repo: Path, *, critic_mode: str = "opus") -> OrchestraRuntime:
     return OrchestraRuntime(
         root=repo,
         runtime_config=RuntimeConfig(
@@ -68,6 +69,7 @@ def runtime(repo: Path) -> OrchestraRuntime:
             max_retries=2,
             poll_interval_seconds=1,
         ),
+        critic_config=CriticConfig(mode=critic_mode),
     )
 
 
@@ -139,6 +141,18 @@ class SequentialWrapper:
         return result
 
 
+class FakeMergeDriver:
+    def __init__(self, result: MergeResult | Exception) -> None:
+        self.result = result
+        self.calls: list[str] = []
+
+    def merge_task(self, task_id: str) -> MergeResult:
+        self.calls.append(task_id)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
 def planner_result(
     repo: Path,
     *,
@@ -194,6 +208,56 @@ def test_submit_writes_request_and_posts_orchestrator_nudge(tmp_path: Path) -> N
         "request_path": str(result.request_path.relative_to(repo)),
         "role": "orchestrator",
     }
+
+
+def test_ingest_task_yaml_writes_valid_pending_task(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task("T-0025")
+
+    path = ingest_task_yaml(yaml.safe_dump(task, sort_keys=False), root=repo)
+
+    assert path == repo / ".orch/tasks/pending/T-0025.yaml"
+    assert TaskStore(repo).read("T-0025")["status"] == "pending"
+
+
+def test_ingest_task_yaml_rejects_schema_invalid_task_without_write(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task("T-0025")
+    task["owned_files"] = []
+
+    try:
+        ingest_task_yaml(yaml.safe_dump(task, sort_keys=False), root=repo)
+    except ValueError as exc:
+        assert "failed validation" in str(exc)
+    else:
+        raise AssertionError("ingest_task_yaml should reject schema-invalid YAML")
+
+    assert TaskStore(repo).list_tasks("pending") == []
+
+
+def test_ingest_task_yaml_rejects_duplicate_task_id_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    original = load_task("T-0025")
+    store = TaskStore(repo)
+    store.write_pending(original)
+    duplicate = load_task("T-0025")
+    duplicate["objective"] = "A different task with the same id."
+
+    try:
+        ingest_task_yaml(yaml.safe_dump(duplicate, sort_keys=False), root=repo)
+    except FileExistsError as exc:
+        assert "task already exists: T-0025" in str(exc)
+    else:
+        raise AssertionError("ingest_task_yaml should reject duplicate ids")
+
+    assert store.read("T-0025")["objective"] == original["objective"]
 
 
 def test_run_once_processes_oldest_inbox_before_dispatch(tmp_path: Path) -> None:
@@ -259,6 +323,103 @@ def test_run_once_invokes_planner_and_ingests_plan(tmp_path: Path) -> None:
             "inbox_role": "orchestrator",
         }
     ]
+
+
+def test_plan_only_invokes_planner_and_returns_plan_path_without_ingesting_tasks(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    plan_content = (
+        "# Plan\n\n```yaml\n"
+        + yaml.safe_dump(load_task(), sort_keys=False)
+        + "```\n"
+    )
+    wrapper = FakePlannerWrapper(
+        planner_result(
+            repo,
+            handoff={
+                "action": "planned",
+                "plan_path": ".orch/plans/P-0001.md",
+                "plan_content": plan_content,
+            },
+        )
+    )
+    plan_runtime = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        model_wrapper=wrapper,
+    )
+
+    plan_path = plan_runtime.plan_only("Please add a feature.")
+    request_path = next((repo / ".orch/requests").glob("R-*.md"))
+
+    assert plan_path == repo / ".orch/plans/P-0001.md"
+    assert plan_path.read_text(encoding="utf-8") == plan_content
+    assert TaskStore(repo).list_tasks("pending") == []
+    assert Inbox(repo).read_next("orchestrator") is None
+    assert wrapper.calls == [
+        {
+            "role": "gemini-planner",
+            "request_path": str(request_path.relative_to(repo)),
+            "log_name": request_path.stem,
+            "inbox_role": "plan-only",
+        }
+    ]
+
+
+def test_plan_only_planner_failure_raises_typed_error_and_preserves_stderr(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    wrapper = FakePlannerWrapper(
+        planner_result(repo, handoff=None, returncode=2, stderr="planner exploded\n")
+    )
+
+    try:
+        OrchestraRuntime(
+            root=repo,
+            runtime_config=RuntimeConfig(
+                max_workers=1,
+                default_timeout_seconds=60,
+                max_retries=2,
+            ),
+            model_wrapper=wrapper,
+        ).plan_only("Please add a feature.")
+    except PlanOnlyError as exc:
+        assert "planner exited unsuccessfully" in str(exc)
+        assert exc.returncode == 2
+        assert exc.stderr_path.parent == repo / ".orch/logs/planner"
+        assert exc.stderr_path.read_text(encoding="utf-8") == "planner exploded\n"
+    else:
+        raise AssertionError("plan_only should raise for failed planner")
+
+
+def test_plan_only_missing_handoff_raises_typed_error(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    wrapper = FakePlannerWrapper(planner_result(repo, handoff=None))
+
+    try:
+        OrchestraRuntime(
+            root=repo,
+            runtime_config=RuntimeConfig(
+                max_workers=1,
+                default_timeout_seconds=60,
+                max_retries=2,
+            ),
+            model_wrapper=wrapper,
+        ).plan_only("Please add a feature.")
+    except PlanOnlyError as exc:
+        assert "handoff" in str(exc)
+        assert exc.stderr_path.parent == repo / ".orch/logs/planner"
+    else:
+        raise AssertionError("plan_only should raise for missing planner handoff")
 
 
 def test_run_once_planner_missing_handoff_acks_request(tmp_path: Path) -> None:
@@ -327,6 +488,279 @@ def test_run_once_dispatches_ready_task_when_no_inbox_message(tmp_path: Path) ->
 
     assert result.kind == "dispatched"
     assert store.read("T-0001")["status"] == "in_progress"
+
+
+def test_dispatch_task_runs_worker_synchronously_and_leaves_self_review(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task()
+    task["owned_files"] = ["feature.txt"]
+    store = TaskStore(repo)
+    store.write_pending(task)
+    wrapper = SequentialWrapper(
+        repo,
+        [
+            agent_result(
+                repo,
+                role="codex-worker",
+                handoff={"action": "worker_completed", "task_id": "T-0001"},
+            )
+        ],
+    )
+
+    result = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        model_wrapper=wrapper,
+    ).dispatch_task("T-0001")
+
+    assert result.task_id == "T-0001"
+    assert result.worktree_path == repo / ".orch/worktrees/T-0001"
+    assert result.worktree_path.exists()
+    assert (repo / ".orch/hooks/T-0001/pre-commit").exists()
+    assert store.read("T-0001")["status"] == "self_review"
+    assert store.list_tasks("pending") == []
+    assert Inbox(repo).read_next("worker") is None
+    assert wrapper.calls == [
+        {
+            "role": "codex-worker",
+            "log_name": "T-0001",
+            "inbox_role": "orchestrator",
+            "task_id": "T-0001",
+            "task_yaml_path": ".orch/tasks/active/T-0001.yaml",
+            "worktree_path": ".orch/worktrees/T-0001",
+        }
+    ]
+
+
+def test_dispatch_task_owned_file_collision_leaves_pending_task(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    store = TaskStore(repo)
+    active = load_task("T-0002")
+    active["owned_files"] = ["orch/**"]
+    pending = load_task("T-0001")
+    pending["owned_files"] = ["orch/runtime.py"]
+    store.write_pending(active)
+    store.transition("T-0002", "active", "in_progress")
+    store.write_pending(pending)
+
+    try:
+        runtime(repo).dispatch_task("T-0001")
+    except RuntimeError as exc:
+        assert "owned_files collide" in str(exc)
+    else:
+        raise AssertionError("dispatch_task should reject owned-file collisions")
+
+    assert (repo / ".orch/tasks/pending/T-0001.yaml").exists()
+    assert not (repo / ".orch/tasks/active/T-0001.yaml").exists()
+    assert not (repo / ".orch/worktrees/T-0001").exists()
+
+
+def test_dispatch_task_worker_failure_leaves_task_active_with_review_note(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    store = TaskStore(repo)
+    store.write_pending(load_task())
+    wrapper = SequentialWrapper(
+        repo,
+        [agent_result(repo, role="codex-worker", handoff=None, returncode=2)],
+    )
+
+    try:
+        OrchestraRuntime(
+            root=repo,
+            runtime_config=RuntimeConfig(
+                max_workers=1,
+                default_timeout_seconds=60,
+                max_retries=2,
+            ),
+            model_wrapper=wrapper,
+        ).dispatch_task("T-0001")
+    except RuntimeError as exc:
+        assert "codex-worker exited with 2" in str(exc)
+    else:
+        raise AssertionError("dispatch_task should fail when worker fails")
+
+    task = store.read("T-0001")
+    assert task["status"] == "in_progress"
+    assert (repo / ".orch/tasks/active/T-0001.yaml").exists()
+    assert task["review_notes"][-1]["author"] == "claude-orchestrator"
+    assert task["review_notes"][-1]["verdict"] == "request_changes"
+    assert "codex-worker exited with 2" in task["review_notes"][-1]["body"]
+
+
+def test_export_diff_returns_patch_contents(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task()
+    task["owned_files"] = ["feature.txt"]
+    store = TaskStore(repo)
+    store.write_pending(task)
+    store.transition("T-0001", "active", "self_review")
+    worktree = repo / ".orch/worktrees/T-0001"
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    git(repo, "worktree", "add", "-b", "task/T-0001", str(worktree), "main")
+    (worktree / "feature.txt").write_text("hello\n", encoding="utf-8")
+    git(worktree, "add", "feature.txt")
+    git(worktree, "commit", "-m", "add feature")
+
+    result = runtime(repo).export_diff("T-0001")
+
+    assert result.diff_path == repo / ".orch/patches/T-0001.diff"
+    assert "+hello" in result.contents
+    assert result.diff_path.read_text(encoding="utf-8") == result.contents
+
+
+def test_rework_task_appends_claude_note_and_reruns_worker(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    store = TaskStore(repo)
+    task = load_task()
+    task["owned_files"] = ["feature.txt"]
+    store.write_pending(task)
+    store.transition("T-0001", "active", "critic_review")
+    (repo / ".orch/worktrees/T-0001").mkdir(parents=True)
+    wrapper = SequentialWrapper(
+        repo,
+        [
+            agent_result(
+                repo,
+                role="codex-worker",
+                handoff={"action": "worker_completed", "task_id": "T-0001"},
+            )
+        ],
+    )
+
+    result = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        model_wrapper=wrapper,
+    ).rework_task("T-0001", "Please tighten the tests.")
+
+    assert result.task_id == "T-0001"
+    task_after = store.read("T-0001")
+    assert task_after["status"] == "self_review"
+    assert task_after["review_notes"][-1]["author"] == "claude-orchestrator"
+    assert task_after["review_notes"][-1]["verdict"] == "request_changes"
+    assert "tighten the tests" in task_after["review_notes"][-1]["body"]
+    assert wrapper.calls[0]["role"] == "codex-worker"
+    assert wrapper.calls[0]["worktree_path"] == ".orch/worktrees/T-0001"
+
+
+def test_rework_task_worker_failure_keeps_in_progress_with_claude_notes(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    store = TaskStore(repo)
+    store.write_pending(load_task())
+    store.transition("T-0001", "active", "critic_review")
+    (repo / ".orch/worktrees/T-0001").mkdir(parents=True)
+    wrapper = SequentialWrapper(
+        repo,
+        [agent_result(repo, role="codex-worker", handoff=None, returncode=2)],
+    )
+
+    try:
+        OrchestraRuntime(
+            root=repo,
+            runtime_config=RuntimeConfig(
+                max_workers=1,
+                default_timeout_seconds=60,
+                max_retries=2,
+            ),
+            model_wrapper=wrapper,
+        ).rework_task("T-0001", "Needs another pass.")
+    except RuntimeError as exc:
+        assert "codex-worker exited with 2" in str(exc)
+    else:
+        raise AssertionError("rework_task should fail when worker fails")
+
+    task = store.read("T-0001")
+    assert task["status"] == "in_progress"
+    assert {note["author"] for note in task["review_notes"]} == {"claude-orchestrator"}
+    assert task["review_notes"][-1]["verdict"] == "request_changes"
+
+
+def test_manual_merge_success_calls_driver_after_integration_transition(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    store = TaskStore(repo)
+    store.write_pending(load_task())
+    store.transition("T-0001", "active", "self_review")
+    merge_result = MergeResult(
+        task_id="T-0001",
+        status="merged",
+        patch_path=repo / ".orch/patches/T-0001.patch",
+        integration_path=repo / ".orch/worktrees/_integration",
+        message="merged",
+    )
+    driver = FakeMergeDriver(merge_result)
+
+    result = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        merge_driver=driver,
+    ).merge_task("T-0001")
+
+    assert result.merged
+    assert driver.calls == ["T-0001"]
+    assert store.read("T-0001")["status"] == "integration_review"
+
+
+def test_manual_merge_failure_leaves_integration_review_with_claude_note(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    store = TaskStore(repo)
+    store.write_pending(load_task())
+    store.transition("T-0001", "active", "self_review")
+    merge_result = MergeResult(
+        task_id="T-0001",
+        status="conflict",
+        patch_path=repo / ".orch/patches/T-0001.patch",
+        integration_path=repo / ".orch/worktrees/_integration",
+        message="patch conflict",
+    )
+
+    result = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        merge_driver=FakeMergeDriver(merge_result),
+    ).merge_task("T-0001")
+
+    assert not result.merged
+    task = store.read("T-0001")
+    assert task["status"] == "integration_review"
+    assert task["review_notes"][-1]["author"] == "claude-orchestrator"
+    assert task["review_notes"][-1]["verdict"] == "request_changes"
+    assert "patch conflict" in task["review_notes"][-1]["body"]
 
 
 def test_run_once_drives_worker_inbox_with_wrapper(tmp_path: Path) -> None:
@@ -558,6 +992,22 @@ def test_run_once_leaves_invalid_planner_handoff_unacked(tmp_path: Path) -> None
     assert inbox.read_next("orchestrator") is not None
 
 
+def test_run_once_rejects_missing_plan_without_embedded_content(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "planned", "plan_path": ".orch/plans/P-0001.md"})
+
+    try:
+        runtime(repo).run_once()
+    except ValueError as exc:
+        assert "missing plan file without plan_content" in str(exc)
+    else:
+        raise AssertionError("run_once should reject planner handoffs with missing plans")
+
+    assert inbox.read_next("orchestrator") is not None
+
+
 def test_run_once_materializes_planned_message_plan_content(tmp_path: Path) -> None:
     repo = init_repo(tmp_path)
     copy_runtime_layout(repo)
@@ -606,7 +1056,7 @@ def test_run_once_recovers_existing_plan_for_submit_request(tmp_path: Path) -> N
     assert TaskStore(repo).read("T-0001")["status"] == "pending"
 
 
-def test_run_once_dispatches_worker_completion_to_critic(tmp_path: Path) -> None:
+def test_run_once_worker_completion_defaults_to_opus_self_review(tmp_path: Path) -> None:
     repo = init_repo(tmp_path)
     copy_runtime_layout(repo)
     task = load_task()
@@ -624,11 +1074,95 @@ def test_run_once_dispatches_worker_completion_to_critic(tmp_path: Path) -> None
 
     result = runtime(repo).run_once()
 
+    assert result.kind == "self_review"
+    assert result.critic_dispatch is None
+    assert store.read("T-0001")["status"] == "self_review"
+    assert inbox.read_next("critic") is None
+    assert inbox.read_next("orchestrator") is None
+
+
+def test_run_once_worker_completion_global_gemini_dispatches_critic(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task()
+    task["owned_files"] = ["feature.txt"]
+    store = TaskStore(repo)
+    store.write_pending(task)
+    store.transition("T-0001", "active", "self_review")
+    worktree = repo / ".orch/worktrees/T-0001"
+    git(repo, "worktree", "add", "-b", "task/T-0001", str(worktree), "main")
+    (worktree / "feature.txt").write_text("hello\n", encoding="utf-8")
+    git(worktree, "add", "feature.txt")
+    git(worktree, "commit", "-m", "add feature")
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "worker_completed", "task_id": "T-0001"})
+
+    result = runtime(repo, critic_mode="gemini").run_once()
+
     assert result.kind == "critic_dispatched"
     assert result.critic_dispatch is not None
     assert result.critic_dispatch.diff_path == repo / ".orch/patches/T-0001.diff"
     assert store.read("T-0001")["status"] == "critic_review"
     assert inbox.read_next("critic") is not None
+    assert inbox.read_next("orchestrator") is None
+
+
+def test_run_once_worker_completion_task_override_gemini_dispatches_critic(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task()
+    task["owned_files"] = ["feature.txt"]
+    task["critic_override"] = "gemini"
+    store = TaskStore(repo)
+    store.write_pending(task)
+    store.transition("T-0001", "active", "self_review")
+    worktree = repo / ".orch/worktrees/T-0001"
+    git(repo, "worktree", "add", "-b", "task/T-0001", str(worktree), "main")
+    (worktree / "feature.txt").write_text("hello\n", encoding="utf-8")
+    git(worktree, "add", "feature.txt")
+    git(worktree, "commit", "-m", "add feature")
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "worker_completed", "task_id": "T-0001"})
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "critic_dispatched"
+    assert store.read("T-0001")["status"] == "critic_review"
+    assert inbox.read_next("critic") is not None
+
+
+def test_run_once_worker_completion_both_dispatches_critic_and_leaves_self_review(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task()
+    task["owned_files"] = ["feature.txt"]
+    task["critic_override"] = "both"
+    store = TaskStore(repo)
+    store.write_pending(task)
+    store.transition("T-0001", "active", "self_review")
+    worktree = repo / ".orch/worktrees/T-0001"
+    git(repo, "worktree", "add", "-b", "task/T-0001", str(worktree), "main")
+    (worktree / "feature.txt").write_text("hello\n", encoding="utf-8")
+    git(worktree, "add", "feature.txt")
+    git(worktree, "commit", "-m", "add feature")
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {"action": "worker_completed", "task_id": "T-0001"})
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "critic_dispatched"
+    assert result.critic_dispatch is not None
+    assert result.critic_dispatch.mode == "both"
+    assert store.read("T-0001")["status"] == "self_review"
+    message = inbox.read_next("critic")
+    assert message is not None
+    assert message.body["final_reviewer"] == "opus"
     assert inbox.read_next("orchestrator") is None
 
 
@@ -692,6 +1226,38 @@ def test_critic_approval_appends_approve_note_before_merge(tmp_path: Path) -> No
     store = TaskStore(repo)
     notes = store.read("T-0001")["review_notes"]
     assert any(n["author"] == "gemini-critic" and n["verdict"] == "approve" for n in notes)
+
+
+def test_critic_verdict_in_both_mode_records_note_without_merge_or_rework(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task()
+    task["owned_files"] = ["feature.txt"]
+    task["critic_override"] = "both"
+    store = TaskStore(repo)
+    store.write_pending(task)
+    store.transition("T-0001", "active", "self_review")
+    _make_feature_worktree(repo)
+    inbox = Inbox(repo)
+    inbox.post("orchestrator", {
+        "action": "critic_reviewed",
+        "task_id": "T-0001",
+        "verdict": "approve",
+        "body": "Looks good as a second opinion.",
+    })
+
+    result = runtime(repo).run_once()
+
+    assert result.kind == "self_review"
+    task_after = store.read("T-0001")
+    assert task_after["status"] == "self_review"
+    assert task_after["review_notes"][-1]["author"] == "gemini-critic"
+    assert task_after["review_notes"][-1]["verdict"] == "approve"
+    assert not (repo / "feature.txt").exists()
+    assert inbox.read_next("worker") is None
+    assert inbox.read_next("orchestrator") is None
 
 
 def test_critic_request_changes_routes_back_to_worker(tmp_path: Path) -> None:
@@ -850,7 +1416,48 @@ def test_critic_approval_with_merge_conflict_routes_back_to_worker(tmp_path: Pat
     assert inbox.read_next("orchestrator") is None
 
 
-def test_mocked_worker_critic_merge_path_needs_no_manual_wrapper(tmp_path: Path) -> None:
+def test_mocked_default_worker_path_does_not_invoke_gemini_critic(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    copy_runtime_layout(repo)
+    task = load_task()
+    task["owned_files"] = ["feature.txt"]
+    TaskStore(repo).write_pending(task)
+    wrapper = SequentialWrapper(
+        repo,
+        [
+            agent_result(
+                repo,
+                role="codex-worker",
+                handoff={"action": "worker_completed", "task_id": "T-0001"},
+            )
+        ]
+    )
+    orch = OrchestraRuntime(
+        root=repo,
+        runtime_config=RuntimeConfig(
+            max_workers=1,
+            default_timeout_seconds=60,
+            max_retries=2,
+        ),
+        model_wrapper=wrapper,
+    )
+
+    assert orch.run_once().kind == "dispatched"
+    worktree = repo / ".orch/worktrees/T-0001"
+    (worktree / "feature.txt").write_text("hello\n", encoding="utf-8")
+    git(worktree, "add", "feature.txt")
+    git(worktree, "commit", "-m", "add feature")
+
+    assert orch.run_once().kind == "agent_ran"
+    assert orch.run_once().kind == "self_review"
+    assert [call["role"] for call in wrapper.calls] == ["codex-worker"]
+    assert Inbox(repo).read_next("critic") is None
+    assert TaskStore(repo).read("T-0001")["status"] == "self_review"
+
+
+def test_mocked_worker_critic_merge_path_with_gemini_mode_needs_no_manual_wrapper(
+    tmp_path: Path,
+) -> None:
     repo = init_repo(tmp_path)
     copy_runtime_layout(repo)
     task = load_task()
@@ -883,6 +1490,7 @@ def test_mocked_worker_critic_merge_path_needs_no_manual_wrapper(tmp_path: Path)
             default_timeout_seconds=60,
             max_retries=2,
         ),
+        critic_config=CriticConfig(mode="gemini"),
         model_wrapper=wrapper,
     )
 
