@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 from orch.doctor import Doctor, REQUIRED_ORCH_DIRS
 
@@ -30,7 +31,7 @@ def test_doctor_passes_when_environment_is_ready(tmp_path: Path) -> None:
     copy_preflight_files(tmp_path)
 
     def runner(argv: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
-        if argv[:3] == ("python", "-m", "orch.gemini_sdk_runner"):
+        if argv[:3] == (sys.executable, "-m", "orch.gemini_sdk_runner"):
             return completed(argv, stdout="gemini_sdk_runner 1.0.0\n")
         if argv[:2] == ("codex", "--version"):
             return completed(argv, stdout="codex 5.5\n")
@@ -93,7 +94,7 @@ def test_doctor_reports_missing_cli_and_dirs(tmp_path: Path) -> None:
             return completed(argv, stdout="Test User\n")
         if argv == ("git", "config", "user.email"):
             return completed(argv, stdout="test@example.local\n")
-        if argv[:3] == ("python", "-m", "orch.gemini_sdk_runner"):
+        if argv[:3] == (sys.executable, "-m", "orch.gemini_sdk_runner"):
             return completed(argv, returncode=1, stderr="GEMINI_API_KEY is not set\n")
         return completed(argv, stdout="ok\n")
 

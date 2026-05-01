@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import shlex
+import sys
 
 import pytest
 
@@ -12,7 +14,7 @@ def test_loads_default_config() -> None:
     config = load_config()
 
     assert config.models.orchestrator == "claude-opus"
-    assert config.cli.gemini == "python -m orch.gemini_sdk_runner"
+    assert config.cli.gemini == shlex.join((sys.executable, "-m", "orch.gemini_sdk_runner"))
     assert config.runtime.max_workers == 1
     assert config.runtime.poll_interval_seconds == 2
     assert config.sandbox.mode == "docker"

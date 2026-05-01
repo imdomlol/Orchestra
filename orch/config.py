@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shlex
+import sys
 import tomllib
 from typing import Any
 
@@ -83,7 +85,7 @@ def load_config(config_dir: Path = DEFAULT_CONFIG_DIR) -> OrchestraConfig:
             integrator=_required_str(orchestrator, "models", "integrator"),
         ),
         cli=CliConfig(
-            gemini=_required_str(orchestrator, "cli", "gemini"),
+            gemini=_resolve_python_command(_required_str(orchestrator, "cli", "gemini")),
             codex=_required_str(orchestrator, "cli", "codex"),
             claude=_section(orchestrator, "cli").get("claude", "claude") or "claude",
         ),
@@ -194,3 +196,10 @@ def _required_str_tuple(data: dict[str, Any], key: str) -> tuple[str, ...]:
     if not all(isinstance(item, str) and item.strip() for item in value):
         raise ValueError(f"{key} must contain only non-empty strings")
     return tuple(value)
+
+
+def _resolve_python_command(command: str) -> str:
+    argv = shlex.split(command)
+    if argv and argv[0] == "python":
+        return shlex.join((sys.executable, *argv[1:]))
+    return command
