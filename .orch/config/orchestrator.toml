@@ -1,7 +1,10 @@
+# [models] binds each role to a model name. This is *which model runs that role*,
+# not *whether that role runs*. Whether the critic role runs is decided by
+# [critic] mode below.
 [models]
 orchestrator = "claude-opus"
 planner = "gemini"
-critic = "gemini"
+critic = "gemini"          # the model invoked when the critic role is dispatched
 worker = "codex-gpt-5.5"
 integrator = "codex-gpt-5.5"
 
@@ -28,6 +31,13 @@ workdir = "/workspace"
 max_tasks_per_request = 5
 max_wall_clock_minutes = 60
 
+# [critic] decides who reviews worker diffs by default.
+#   "opus"   → orchestrator (Claude Opus) self-reviews; task moves to self_review
+#             and waits for a human-driven `orch chat` decision.
+#   "gemini" → automatic critic dispatch to the [models] critic above.
+#   "both"   → dispatch to gemini AND queue an opus self-review.
+# A task may set `critic_override: gemini|both` to escalate, but cannot
+# downgrade below the default mode.
 [critic]
 mode = "opus"
 

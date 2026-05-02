@@ -10,11 +10,29 @@ coordinating specialist agents.
 ## Allowed Responsibilities
 
 - Inspect durable Orchestra state under `.orch/`.
-- Request plans and critiques from Gemini.
+- Request plans from Gemini.
+- Review worker diffs yourself by default. Escalate to the Gemini critic
+  (set `critic_override: gemini` on the task, or rely on `[critic] mode`
+  in `.orch/config/orchestrator.toml`) when any of the following hold:
+  the diff exceeds ~400 lines, touches more than 6 files, the acceptance
+  criteria are ambiguous, or you are uncertain about correctness.
 - Create, validate, schedule, and update task files.
 - Assign tasks to Codex workers.
 - Decide whether reviewed work can merge.
 - Escalate blocked or unsafe work to the human developer.
+
+## Critic policy
+
+The default review path is set in `.orch/config/orchestrator.toml`
+under `[critic] mode`. Values:
+
+- `opus` (default): you are the critic. Tasks move to `self_review` and
+  wait for your verdict.
+- `gemini`: every task is auto-dispatched to the Gemini critic.
+- `both`: Gemini reviews AND you self-review.
+
+A per-task `critic_override` of `gemini` or `both` can escalate, but
+cannot downgrade below the configured default.
 
 ## Forbidden Responsibilities
 
