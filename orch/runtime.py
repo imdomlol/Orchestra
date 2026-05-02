@@ -370,6 +370,41 @@ class OrchestraRuntime:
     def export_diff(self, task_id: str) -> DiffExportResult:
         return self.review_dispatcher.export_diff(task_id)
 
+    def review_with_gemini(self, task_id: str) -> dict:
+        """Synchronously run the Gemini critic against a task's diff.
+
+        Returns the parsed handoff dict (with at least a `verdict` field).
+        Does not post to the orchestrator inbox or transition task status —
+        the chat orchestrator owns the decision to approve/rework/abandon.
+        """
+        diff = self.review_dispatcher.export_diff(task_id)
+        task_path = self.task_store.path_for(task_id).relative_to(self.root)
+        wrapper = self.model_wrapper or ModelWrapper(
+            root=self.root,
+            inbox=self.inbox,
+            stderr_sink=self._model_stderr_sink,
+        )
+        result = wrapper.run_role(
+            "gemini-critic",
+            log_name=task_id,
+            post_handoff=False,
+            task_id=task_id,
+            task_yaml_path=str(task_path),
+            diff_path=str(diff.diff_path.relative_to(self.root)),
+            policy_path=".orch/config/policies.toml",
+        )
+        if not result.succeeded:
+            stderr = (
+                result.process.stderr_path.read_text(encoding="utf-8")
+                if result.process.stderr_path.exists()
+                else ""
+            )
+            raise RuntimeError(
+                f"gemini critic failed for {task_id} (exit {result.process.returncode}): "
+                f"{stderr.strip() or 'no handoff parsed'}"
+            )
+        return result.handoff or {}
+
     def rework_task(self, task_id: str, notes: str) -> SyncDispatchResult:
         if not notes.strip():
             raise ValueError("notes must not be empty")

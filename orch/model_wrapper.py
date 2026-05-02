@@ -60,7 +60,7 @@ class WrapperResult:
 
     @property
     def succeeded(self) -> bool:
-        return self.process.succeeded and self.handoff_path is not None
+        return self.process.succeeded and self.handoff is not None
 
 
 class ModelWrapper:
@@ -88,6 +88,7 @@ class ModelWrapper:
         timeout_seconds: int | None = None,
         log_name: str | None = None,
         inbox_role: str = "orchestrator",
+        post_handoff: bool = True,
         **context: Any,
     ) -> WrapperResult:
         spec = self._spec_for(role)
@@ -112,7 +113,8 @@ class ModelWrapper:
         if handoff is not None:
             handoff = self._prepare_planner_handoff(role, handoff, stdout_text)
             handoff.setdefault("role", role)
-            handoff_path = self.inbox.post(inbox_role, handoff)
+            if post_handoff:
+                handoff_path = self.inbox.post(inbox_role, handoff)
 
         return WrapperResult(
             role=role,

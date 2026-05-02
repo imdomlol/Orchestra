@@ -76,6 +76,16 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             print(result.merge_result.message or result.merge_result.status, file=sys.stderr)
             return 1
+        if args.command == "gemini-review":
+            OrchestraRuntime, result_to_dict = _runtime_api()
+            runtime = OrchestraRuntime.from_config(
+                root=args.root,
+                on_progress=_print_progress,
+                model_stderr_sink=_model_stderr_sink,
+            )
+            handoff = runtime.review_with_gemini(args.task_id)
+            print(json.dumps(handoff, indent=2, sort_keys=True))
+            return 0
         if args.command == "list-tasks":
             from orch.task_store import TaskStore
 
@@ -202,6 +212,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="merge one reviewed task through integration review",
     )
     merge.add_argument("task_id")
+
+    gemini_review = subparsers.add_parser(
+        "gemini-review",
+        help="synchronously run the Gemini critic against a task and print the handoff JSON",
+    )
+    gemini_review.add_argument("task_id")
 
     list_tasks = subparsers.add_parser("list-tasks", help="list task YAML paths by status")
     list_tasks.add_argument(

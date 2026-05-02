@@ -142,6 +142,16 @@ class ChatOrchestrator:
                 "input_schema": _object_schema({"task_id": {"type": "string"}}, ["task_id"]),
             },
             {
+                "name": "gemini_review",
+                "description": (
+                    "Synchronously run the Gemini critic against a task's diff and return "
+                    "its handoff JSON (verdict + notes). Use when you want a second opinion "
+                    "before approving or reworking — diff is large/complex, criteria are "
+                    "ambiguous, or you are uncertain about correctness."
+                ),
+                "input_schema": _object_schema({"task_id": {"type": "string"}}, ["task_id"]),
+            },
+            {
                 "name": "list_tasks",
                 "description": "List task YAML paths by state.",
                 "input_schema": _object_schema(
@@ -187,6 +197,8 @@ class ChatOrchestrator:
                 )
             if name == "merge":
                 return self._run_cli(name, ["merge", _str_arg(arguments, "task_id")])
+            if name == "gemini_review":
+                return self._run_cli(name, ["gemini-review", _str_arg(arguments, "task_id")])
             if name == "list_tasks":
                 return self._list_tasks(arguments)
             if name == "read_file":

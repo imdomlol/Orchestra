@@ -114,11 +114,13 @@ def test_tool_definitions_match_documented_schema(tmp_path: Path) -> None:
         "diff",
         "rework",
         "merge",
+        "gemini_review",
         "list_tasks",
         "read_file",
         "run_shell",
     ]
     assert tools["plan"]["input_schema"]["required"] == ["request"]
+    assert tools["gemini_review"]["input_schema"]["required"] == ["task_id"]
     assert tools["list_tasks"]["input_schema"]["properties"]["status"]["enum"] == [
         "pending",
         "active",
@@ -167,6 +169,30 @@ def test_scripted_conversation_drives_cli_subprocesses_in_order(
         ["merge", "T-0001"],
     ]
     assert calls[1][1] == "id: T-0001\n"
+
+
+def test_gemini_review_tool_dispatches_to_gemini_review_subcommand(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    copy_chat_layout(repo)
+    captured: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        captured.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout='{"verdict": "approve"}', stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = ChatOrchestrator(repo, sdk=FakeSDK).execute_tool(
+        "gemini_review", {"task_id": "T-0001"}
+    )
+
+    assert result.exit_code == 0
+    assert "approve" in result.stdout
+    root_index = captured[0].index("--root")
+    assert captured[0][root_index + 2 :] == ["gemini-review", "T-0001"]
 
 
 def test_tool_errors_are_returned_to_model_not_raised(
@@ -325,6 +351,7 @@ def test_sdk_options_expose_orchestra_tools_only(tmp_path: Path) -> None:
         "diff",
         "rework",
         "merge",
+        "gemini_review",
         "list_tasks",
         "read_file",
         "run_shell",
