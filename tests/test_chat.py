@@ -129,6 +129,19 @@ def test_tool_definitions_match_documented_schema(tmp_path: Path) -> None:
     ]
 
 
+def test_delegate_mode_supplies_default_chat_model(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    copy_chat_layout(repo)
+    config_path = repo / ".orch/config/orchestrator.toml"
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace('chat_model = "claude-opus-4-7"', 'chat_model = "claude-delegate"')
+    config_path.write_text(text, encoding="utf-8")
+
+    assert ChatOrchestrator(repo, sdk=FakeSDK).model == "claude-delegate"
+    assert ChatOrchestrator(repo, sdk=FakeSDK, model="claude-explicit").model == "claude-explicit"
+
+
 def test_scripted_conversation_drives_cli_subprocesses_in_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

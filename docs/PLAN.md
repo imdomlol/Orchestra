@@ -717,6 +717,229 @@ bar for "first test drive."
 
 ---
 
+## 15. Delegate-Always Pivot
+
+The next product direction is an Opus-led chat workflow where Claude Opus is
+the user's strategic interface, not the coding engine. Opus should spend
+tokens on understanding intent, writing high-quality prompts, decomposing
+plans, and making merge/rework decisions. Implementation work should be
+delegated to Codex workers by default. Gemini should be used for planning and
+architecture analysis through a single-call interface, not as an agentic CLI
+that explores the repo on its own.
+
+### Target Workflow
+
+```
+User
+  -> Claude Opus chat: understand goal, clarify only when necessary
+  -> Gemini planner: produce architecture, task plan, risks, test strategy
+  -> Claude Opus chat: convert plan into bounded Codex tasks
+  -> Codex workers: edit, test, and report compact structured results
+  -> Codex reviewer or Opus: review only summaries/diffs needed for decision
+  -> Claude Opus chat: merge/rework/abandon and summarize outcome to user
+```
+
+This becomes the preferred workflow for `orch chat`. The older unattended
+`orch submit` -> `orch run` pipeline remains available as a substrate and
+regression target, but it is no longer the primary UX.
+
+### Role Policy
+
+- **Claude Opus chat**
+  - Allowed: talk to the user, decide whether clarification is required,
+    write the Gemini planning prompt, ingest the Gemini plan, author task
+    YAML, dispatch workers, inspect compact summaries, request focused diffs,
+    choose merge/rework/abandon.
+  - Forbidden by default: editing source, reading broad file trees, reading
+    full worker transcripts, and performing implementation itself.
+  - May inspect code only when worker summaries identify a blocker,
+    ambiguity, failed acceptance check, or suspicious diff.
+- **Gemini planner**
+  - Runs as a one-shot planning model call with a bounded intent packet and
+    optional repo summary.
+  - Produces a Markdown plan containing architecture notes, task boundaries,
+    dependencies, risks, and test strategy.
+  - Does not edit files and does not autonomously inspect the repo.
+- **Codex worker**
+  - Owns implementation. Reads relevant files, edits only `owned_files`, runs
+    allowed tests, and returns a compact structured handoff.
+  - Reports `needs_attention` instead of dumping logs into Opus context.
+- **Codex reviewer / integrator**
+  - Default reviewer for routine code correctness and test integration.
+  - Opus only performs final product judgment or high-risk review when the
+    task changes architecture, security, data migration, or major user-facing
+    behavior.
+
+### Context Discipline
+
+Worker and reviewer handoffs must fit in a compact structured envelope:
+
+```yaml
+task_id: T-0031
+status: completed
+files_changed:
+  - orch/chat.py
+  - tests/test_chat.py
+commands_run:
+  - uv run pytest tests/test_chat.py -q
+result: passed
+notes:
+  - Added delegate-always mode prompt routing.
+needs_attention: []
+```
+
+Claude should not read `.orch/logs/**`, full patches, or full file contents
+unless `needs_attention` is non-empty or the user explicitly asks for that
+detail. Tool results returned to Opus should be truncated and summarized by
+default, with explicit commands for full artifacts.
+
+### Task Sizing Policy
+
+The planner and Opus decomposer should prefer fewer, larger tasks:
+
+| Request shape | Default task count |
+|---|---|
+| Tiny or greenfield, <10 files | 1 Codex task |
+| Normal feature or bug fix | 1-3 Codex tasks |
+| Clear disjoint surfaces | 2-4 parallel Codex tasks |
+| Cross-cutting refactor or migration | 3-6 serial/parallel tasks |
+
+Task splitting is justified only by real file ownership boundaries,
+parallelism, risk isolation, or review clarity. It is not justified merely
+because the plan has many conceptual steps.
+
+### Configuration Target
+
+Add an explicit delegate-always mode:
+
+```toml
+[mode.delegate_always]
+enabled = true
+chat_model = "claude-opus-4-7"
+planner_model = "gemini"
+worker_model = "codex-gpt-5.5"
+reviewer_model = "codex-gpt-5.5"
+
+claude_reads_files = "on_attention"
+claude_reads_worker_logs = "on_failure"
+gemini_interface = "sdk_single_call"
+max_tasks_small_repo = 1
+max_tasks_default = 3
+max_parallel_workers = 2
+```
+
+This section should be loaded into runtime config without breaking the
+existing `[models]`, `[runtime]`, and `[critic]` sections.
+
+### Implementation Tasks
+
+**T-0030 delegate-mode-config — implemented**
+  - Objective: Add config support for delegate-always mode and expose it to
+    chat orchestration.
+  - Owned files: `orch/config.py`, `.orch/config/orchestrator.toml`,
+    `tests/test_config.py`, `docs/PLAN.md`.
+  - Acceptance:
+    - Config loads `[mode.delegate_always]` with defaults matching this
+      section.
+    - Existing config files without the section continue to load.
+    - Invalid read policies or non-positive task caps fail clearly.
+    - Tests cover default, configured, and invalid values.
+
+**T-0031 gemini-single-call-planner — implemented**
+  - Objective: Replace Gemini CLI planner usage in chat-first planning with a
+    single-call SDK runner that cannot enter an agentic tool loop.
+  - Owned files: `orch/gemini_sdk_runner.py`, `orch/model_wrapper.py`,
+    `tests/test_model_wrapper.py`, `tests/test_runtime.py`,
+    `.orch/config/orchestrator.toml`, `docs/PLAN.md`.
+  - Acceptance:
+    - `gemini-planner` can be configured to use the SDK runner by default.
+    - One planner invocation maps to one model request from Orchestra's
+      perspective.
+    - The runner emits the same `ORCH_HANDOFF` shape already consumed by
+      `ModelWrapper`.
+    - Tests mock the SDK boundary and verify no shell Gemini CLI is required.
+
+**T-0032 chat-intent-packet**
+  - Objective: Teach `orch chat` to create a compact planning packet before
+    calling Gemini.
+  - Owned files: `orch/chat.py`, `.orch/config/prompts/claude-chat.md`,
+    `tests/test_chat.py`, `docs/PLAN.md`.
+  - Acceptance:
+    - The chat system prompt instructs Opus to call `plan` with an intent
+      packet instead of broad repo-reading commands.
+    - The intent packet includes goal, constraints, known repo context, risk
+      level, and desired output.
+    - Opus asks clarifying questions only when required to avoid risky
+      assumptions.
+    - Tests verify the exposed tool descriptions and prompt text encode this
+      policy.
+
+**T-0033 bounded-decomposition**
+  - Objective: Add task-count guardrails to the Opus decomposition workflow.
+  - Owned files: `orch/chat.py`, `orch/plans.py`,
+    `.orch/config/prompts/claude-chat.md`, `tests/test_chat.py`,
+    `tests/test_plans.py`, `docs/PLAN.md`.
+  - Acceptance:
+    - Chat guidance requires 1 task for tiny/greenfield requests unless there
+      is an explicit ownership or parallelism reason.
+    - Decomposition rejects or warns on plans exceeding delegate mode caps.
+    - Rejection message asks Opus to consolidate tasks rather than blindly
+      ingesting over-split plans.
+    - Tests cover small-repo one-task guidance and cap enforcement.
+
+**T-0034 compact-worker-handoffs**
+  - Objective: Ensure Codex worker results are summarized before Opus sees
+    them.
+  - Owned files: `orch/model_wrapper.py`, `orch/runtime.py`, `orch/chat.py`,
+    `.orch/config/prompts/codex-worker.md`, `tests/test_model_wrapper.py`,
+    `tests/test_runtime.py`, `tests/test_chat.py`, `docs/PLAN.md`.
+  - Acceptance:
+    - Worker prompts require the compact handoff envelope documented above.
+    - Chat tool payloads show handoff summary, changed files, commands, test
+      result, and `needs_attention`, not raw logs.
+    - Full stdout/stderr paths remain available for explicit debugging.
+    - Tests verify truncation and summary behavior.
+
+**T-0035 codex-default-review**
+  - Objective: Make Codex the default code reviewer/integrator for routine
+    worker output while leaving Opus in charge of final decisions.
+  - Owned files: `orch/runtime.py`, `orch/review.py`, `orch/chat.py`,
+    `.orch/config/orchestrator.toml`, `tests/test_runtime.py`,
+    `tests/test_review.py`, `tests/test_chat.py`, `docs/PLAN.md`.
+  - Acceptance:
+    - Routine completed tasks can be sent to `codex-integrator` before Opus
+      reads a full diff.
+    - Opus receives a compact reviewer verdict and only requests full diffs
+      when needed.
+    - High-risk tasks can still route to Gemini critic or Opus review.
+    - Existing manual `orch diff`, `orch rework`, and `orch merge` commands
+      keep working.
+
+**T-0036 delegate-chat-runbook**
+  - Objective: Rewrite the primary user documentation around delegate-always
+    `orch chat`.
+  - Owned files: `README.md`, `docs/RUNBOOK.md`, `docs/PLAN.md`.
+  - Acceptance:
+    - README presents `orch chat` as the preferred workflow.
+    - Runbook explains Claude login, Gemini SDK credentials, Codex CLI
+      credentials, task caps, and where summaries/logs live.
+    - The older `orch submit`/`orch run` path is documented as unattended
+      mode, not the main recommendation.
+
+### Success Criteria
+
+- A small repo replacement request (for example, "replace this repo with a
+  Python pygame Pong game") uses one Gemini planning call and one Codex
+  worker task by default.
+- Claude Opus does not read full logs or implement code on the happy path.
+- The user can remain in `orch chat` while Opus delegates all coding work.
+- The final answer reports changed files, commands run, and whether tests
+  passed without exposing full transcripts.
+- Token spend scales with uncertainty and review risk, not with the number of
+  implementation steps in a simple task.
+
+---
+
 ## Known Issues
 
 ### BUG-001 — Gemini CLI is an agentic loop, not a single-call tool

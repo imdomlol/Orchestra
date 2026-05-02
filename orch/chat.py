@@ -60,7 +60,12 @@ class ChatOrchestrator:
     ) -> None:
         self.root = root.resolve()
         self.config = load_config(self.root / ".orch" / "config")
-        self.model = model or self.config.chat.model or DEFAULT_MODEL
+        configured_model = (
+            self.config.delegate_always.chat_model
+            if self.config.delegate_always.enabled
+            else self.config.chat.model
+        )
+        self.model = model or configured_model or DEFAULT_MODEL
         self.use_cache = use_cache
         self.dry_run = dry_run
         self.output = output if output is not None else sys.stdout

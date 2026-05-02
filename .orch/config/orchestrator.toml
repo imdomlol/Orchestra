@@ -43,3 +43,16 @@ mode = "opus"
 
 [chat]
 model = "claude-opus-4-7"
+
+[mode.delegate_always]
+enabled = true
+chat_model = "claude-opus-4-7"
+planner_model = "gemini"
+worker_model = "codex-gpt-5.5"
+reviewer_model = "codex-gpt-5.5"
+claude_reads_files = "on_attention"
+claude_reads_worker_logs = "on_failure"
+gemini_interface = "sdk_single_call"
+max_tasks_small_repo = 1
+max_tasks_default = 3
+max_parallel_workers = 2
